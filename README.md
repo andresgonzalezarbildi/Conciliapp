@@ -2,7 +2,7 @@
 
 Aplicación web para comparar movimientos de un sistema contable con una planilla de caja o banco. Funciona directamente en el navegador con HTML, CSS, JavaScript y SheetJS, sin backend ni base de datos.
 
-![Vista de revisión de la conciliación](conciliacion-contable.jpg)
+![Vista de revisión de la conciliación](conciliacion-contable.png)
 
 ## Qué permite hacer
 
