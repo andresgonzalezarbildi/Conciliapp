@@ -5,6 +5,7 @@ const DEFAULT_CONFIG = Object.freeze({
   amountAbsTolerance: 0.10,
   amountPercentTolerance: 0,
   maxGroupSize: 8,
+  maxPairComparisons: 2000000,
   maxCombinations: 25000,
   requireSameSign: true,
   invertBetweenTables: false,
@@ -33,6 +34,14 @@ const FIELD_LABELS = {
   credit: "Crédito",
   status: "Estado (opcional)"
 };
+const HEADER_ALIASES = Object.freeze({
+  date: ["fecha", "date", "fec", "fecha movimiento", "fecha valor"],
+  description: ["descripcion", "description", "concepto", "detalle", "glosa", "referencia", "movimiento"],
+  amount: ["monto", "importe", "amount", "saldo movimiento", "valor"],
+  debit: ["debito", "debe", "debit", "egreso", "retiro", "cargo", "pagos"],
+  credit: ["credito", "haber", "credit", "ingreso", "deposito", "abono", "ingresos"],
+  status: ["estado", "status", "conciliado", "situacion"]
+});
 
 const state = {
   step: 1,
@@ -43,7 +52,7 @@ const state = {
   },
   config: { ...DEFAULT_CONFIG },
   results: createEmptyResults(),
-  processing: { cancelled: false, running: false },
+  processing: { cancelled: false, running: false, worker: null, jobId: null },
   review: {
     tab: "confirmed",
     search: "",
@@ -67,8 +76,19 @@ function createEmptySource(key, label) {
     selectedSheet: "",
     matrix: [],
     headerRowIndex: 0,
+    headerRowNumber: 1,
+    dataStartRow: 2,
+    dataEndRow: "",
     headers: [],
     rows: [],
+    detectedBlocks: [],
+    columnBlock: "all",
+    dateFrom: "",
+    dateTo: "",
+    reportPeriod: null,
+    periodSource: "",
+    excludedDescriptions: "saldo inicial, totales, total",
+    filteredRowsCount: 0,
     formatMode: "auto",
     detectedFormat: "signed",
     positiveMeaning: "debit",
@@ -87,8 +107,12 @@ function createEmptyResults() {
   return {
     reconciliations: [],
     processingAt: null,
+    evaluatedPairs: 0,
+    candidatePairs: 0,
     evaluatedCombinations: 0,
+    pairLimitReached: false,
     combinationLimitReached: false,
+    engineMode: "",
     nextId: 1
   };
 }
@@ -160,7 +184,7 @@ function bindGlobalEvents() {
   dom.configForm.addEventListener("input", readConfigForm);
   dom.configForm.addEventListener("change", readConfigForm);
   document.getElementById("processBtn").addEventListener("click", startReconciliation);
-  document.getElementById("cancelProcessBtn").addEventListener("click", () => { state.processing.cancelled = true; });
+  document.getElementById("cancelProcessBtn").addEventListener("click", requestProcessingCancellation);
   document.getElementById("reprocessBtn").addEventListener("click", () => goToStep(4));
   document.getElementById("continueExportBtn").addEventListener("click", () => {
     renderExportSummary();
@@ -236,6 +260,14 @@ function bindSourceEditor(sourceKey) {
     fileSummary: editor.querySelector("[data-file-summary]"),
     importWorkspace: editor.querySelector("[data-import-workspace]"),
     sheetSelect: editor.querySelector("[data-sheet-select]"),
+    headerRow: editor.querySelector("[data-header-row]"),
+    dataStartRow: editor.querySelector("[data-data-start-row]"),
+    dataEndRow: editor.querySelector("[data-data-end-row]"),
+    columnBlockField: editor.querySelector("[data-column-block-field]"),
+    columnBlock: editor.querySelector("[data-column-block]"),
+    dateFrom: editor.querySelector("[data-date-from]"),
+    dateTo: editor.querySelector("[data-date-to]"),
+    excludedDescriptions: editor.querySelector("[data-excluded-descriptions]"),
     detectionNote: editor.querySelector("[data-detection-note]"),
     mappingGrid: editor.querySelector("[data-mapping-grid]"),
     validationBox: editor.querySelector("[data-validation-box]"),
@@ -282,6 +314,33 @@ function bindSourceEditor(sourceKey) {
     autoMapColumns(source);
     renderSourceEditor(sourceKey);
   });
+  refs.headerRow.addEventListener("change", event => {
+    const next = clamp(Math.trunc(Number(event.target.value) || 1), 1, Math.max(1, source.matrix.length));
+    source.headerRowNumber = next;
+    source.dataStartRow = next + 1;
+    applySelectedTableRange(source);
+    autoMapColumns(source);
+    renderSourceEditor(sourceKey);
+  });
+  refs.dataStartRow.addEventListener("change", event => {
+    source.dataStartRow = clamp(Math.trunc(Number(event.target.value) || source.headerRowNumber + 1), 1, Math.max(1, source.matrix.length));
+    applySelectedTableRange(source);
+    renderSourceEditor(sourceKey);
+  });
+  refs.dataEndRow.addEventListener("change", event => {
+    const value = String(event.target.value || "").trim();
+    source.dataEndRow = value ? clamp(Math.trunc(Number(value)), source.dataStartRow, Math.max(source.dataStartRow, source.matrix.length)) : "";
+    applySelectedTableRange(source);
+    renderSourceEditor(sourceKey);
+  });
+  refs.columnBlock.addEventListener("change", event => {
+    source.columnBlock = event.target.value;
+    autoMapColumns(source);
+    renderSourceEditor(sourceKey);
+  });
+  refs.dateFrom.addEventListener("change", event => { source.dateFrom = event.target.value; validateSource(sourceKey); renderImportDetectionNote(source, refs.detectionNote); });
+  refs.dateTo.addEventListener("change", event => { source.dateTo = event.target.value; validateSource(sourceKey); renderImportDetectionNote(source, refs.detectionNote); });
+  refs.excludedDescriptions.addEventListener("change", event => { source.excludedDescriptions = event.target.value.trim(); validateSource(sourceKey); });
   toggleFormatOptions(editor, source);
 }
 
@@ -311,7 +370,7 @@ async function loadSourceFile(sourceKey, file) {
     const input = isCsv ? new TextDecoder("utf-8").decode(data) : data;
     const workbook = XLSX.read(input, {
       type: isCsv ? "string" : "array",
-      cellDates: true,
+      cellDates: false,
       dense: false,
       raw: isCsv,
       codepage: 65001
@@ -321,7 +380,17 @@ async function loadSourceFile(sourceKey, file) {
       file,
       workbook,
       sheetNames: [...workbook.SheetNames],
-      selectedSheet: workbook.SheetNames[0],
+      selectedSheet: selectInitialSheet(workbook),
+      headerRowNumber: 1,
+      dataStartRow: 2,
+      dataEndRow: "",
+      detectedBlocks: [],
+      columnBlock: "all",
+      dateFrom: "",
+      dateTo: "",
+      reportPeriod: null,
+      periodSource: "",
+      filteredRowsCount: 0,
       invalidRows: [],
       validationErrors: [],
       validationWarnings: [],
@@ -339,43 +408,76 @@ async function loadSourceFile(sourceKey, file) {
 
 function extractSelectedSheet(source) {
   const sheet = source.workbook.Sheets[source.selectedSheet];
-  const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: "", blankrows: false });
-  const headerRowIndex = matrix.findIndex(row => Array.isArray(row) && row.some(value => String(value).trim() !== ""));
+  const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: "", blankrows: true });
+  const headerRowIndex = detectHeaderRow(matrix);
   if (headerRowIndex < 0) {
     source.matrix = [];
     source.headers = [];
     source.rows = [];
     return;
   }
-  const rawHeaders = matrix[headerRowIndex];
-  const width = Math.max(rawHeaders.length, ...matrix.slice(headerRowIndex + 1).map(row => row.length));
+  source.matrix = matrix;
+  source.headerRowNumber = headerRowIndex + 1;
+  source.dataStartRow = headerRowIndex + 2;
+  source.dataEndRow = "";
+  source.columnBlock = "all";
+  source.reportPeriod = detectReportPeriod(matrix, headerRowIndex);
+  if (source.reportPeriod) {
+    source.dateFrom = source.reportPeriod.from;
+    source.dateTo = source.reportPeriod.to;
+    source.periodSource = "archivo";
+  } else if (source.key === "bank") {
+    const system = state.sources.system;
+    const from = system.reportPeriod?.from || system.dateFrom;
+    const to = system.reportPeriod?.to || system.dateTo;
+    if (from && to) {
+      source.dateFrom = from;
+      source.dateTo = to;
+      source.periodSource = "sistema";
+    }
+  }
+  applySelectedTableRange(source);
+}
+
+function applySelectedTableRange(source) {
+  if (!source.matrix.length) return;
+  const headerRowIndex = clamp(source.headerRowNumber - 1, 0, source.matrix.length - 1);
+  const rawHeaders = source.matrix[headerRowIndex] || [];
+  const endRowIndex = source.dataEndRow ? Math.min(Number(source.dataEndRow), source.matrix.length) : source.matrix.length;
+  const dataStartIndex = clamp(source.dataStartRow - 1, 0, source.matrix.length);
+  const relevantRows = source.matrix.slice(Math.min(headerRowIndex, dataStartIndex), endRowIndex);
+  const width = Math.max(rawHeaders.length, 0, ...relevantRows.map(row => row.length));
   const headers = Array.from({ length: width }, (_, index) => {
     const value = String(rawHeaders[index] ?? "").trim();
     return value || `Columna ${columnLetter(index + 1)}`;
   });
-  source.matrix = matrix;
   source.headerRowIndex = headerRowIndex;
   source.headers = headers;
-  source.rows = matrix.slice(headerRowIndex + 1).map((values, index) => ({
-    excelRow: headerRowIndex + index + 2,
+  source.detectedBlocks = detectColumnBlocks(source);
+  if (source.detectedBlocks.length >= 2 && source.columnBlock === "all") source.columnBlock = "choose";
+  if (!["all", "choose"].includes(source.columnBlock) && !source.detectedBlocks.some(block => block.value === source.columnBlock)) source.columnBlock = "all";
+  source.rows = source.matrix.slice(dataStartIndex, endRowIndex).map((values, index) => ({
+    excelRow: dataStartIndex + index + 1,
     values: Array.from({ length: width }, (_, column) => values[column] ?? "")
   })).filter(row => row.values.some(value => String(value).trim() !== ""));
 }
 
 function autoMapColumns(source) {
   const normalized = source.headers.map(header => normalizeHeader(header));
+  const selectedBlock = source.detectedBlocks.find(block => block.value === source.columnBlock);
+  const allowed = normalized.map((_, index) => index).filter(index => !selectedBlock || (index >= selectedBlock.start && index <= selectedBlock.end));
   const find = aliases => {
-    let index = normalized.findIndex(header => aliases.includes(header));
-    if (index < 0) index = normalized.findIndex(header => aliases.some(alias => header.includes(alias)));
-    return index < 0 ? "" : String(index);
+    let index = allowed.find(column => aliases.includes(normalized[column]));
+    if (index === undefined) index = allowed.find(column => aliases.some(alias => normalized[column].includes(alias)));
+    return index === undefined ? "" : String(index);
   };
   const detected = {
-    date: find(["fecha", "date", "fec", "fecha movimiento", "fecha valor"]),
-    description: find(["descripcion", "description", "concepto", "detalle", "glosa", "referencia", "movimiento"]),
-    amount: find(["monto", "importe", "amount", "saldo movimiento", "valor"]),
-    debit: find(["debito", "debe", "debit", "egreso", "retiro", "cargo"]),
-    credit: find(["credito", "haber", "credit", "ingreso", "deposito", "abono"]),
-    status: find(["estado", "status", "conciliado", "situacion"])
+    date: find(HEADER_ALIASES.date),
+    description: find(HEADER_ALIASES.description),
+    amount: find(HEADER_ALIASES.amount),
+    debit: find(HEADER_ALIASES.debit),
+    credit: find(HEADER_ALIASES.credit),
+    status: find(HEADER_ALIASES.status)
   };
   const hasSplit = detected.debit !== "" && detected.credit !== "";
   const hasSigned = detected.amount !== "";
@@ -389,6 +491,90 @@ function autoMapColumns(source) {
     credit: effective === "split" ? detected.credit : "",
     status: detected.status
   };
+}
+
+function detectHeaderRow(matrix) {
+  let bestIndex = -1;
+  let bestScore = -1;
+  const limit = Math.min(matrix.length, 80);
+  for (let index = 0; index < limit; index++) {
+    const row = Array.isArray(matrix[index]) ? matrix[index] : [];
+    if (!row.some(value => String(value ?? "").trim() !== "")) continue;
+    const score = headerRowScore(row);
+    if (score > bestScore) { bestScore = score; bestIndex = index; }
+  }
+  return bestIndex;
+}
+
+function headerRowScore(row) {
+  const normalized = (row || []).map(normalizeHeader);
+  const has = field => normalized.some(value => HEADER_ALIASES[field].some(alias => value === alias || value.includes(alias)));
+  return (has("date") ? 6 : 0) + (has("description") ? 6 : 0) + (has("amount") ? 5 : 0) + (has("debit") ? 4 : 0) + (has("credit") ? 4 : 0) + Math.min(3, normalized.filter(Boolean).length / 3);
+}
+
+function selectInitialSheet(workbook) {
+  for (const name of workbook.SheetNames) {
+    const sheet = workbook.Sheets[name];
+    if (!sheet?.["!ref"]) continue;
+    const range = XLSX.utils.decode_range(sheet["!ref"]);
+    const lastRow = Math.min(range.e.r, range.s.r + 79);
+    const lastColumn = Math.min(range.e.c, range.s.c + 49);
+    for (let row = range.s.r; row <= lastRow; row++) {
+      const values = [];
+      for (let column = range.s.c; column <= lastColumn; column++) values.push(sheet[XLSX.utils.encode_cell({ r: row, c: column })]?.v ?? "");
+      if (headerRowScore(values) >= 15) return name;
+    }
+  }
+  return workbook.SheetNames[0];
+}
+
+function detectReportPeriod(matrix, headerRowIndex) {
+  const datePattern = /\b\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}\b/g;
+  for (const row of matrix.slice(0, Math.max(0, headerRowIndex))) {
+    for (const value of row || []) {
+      const matches = String(value ?? "").match(datePattern) || [];
+      if (matches.length < 2) continue;
+      const from = parseDateValue(matches[0]);
+      const to = parseDateValue(matches[1]);
+      if (from && to && from <= to) return { from: toDateKey(from), to: toDateKey(to) };
+    }
+  }
+  return null;
+}
+
+function detectColumnBlocks(source) {
+  const normalized = source.headers.map(normalizeHeader);
+  const dateColumns = normalized.map((value, index) => HEADER_ALIASES.date.some(alias => value === alias || value.includes(alias)) ? index : -1).filter(index => index >= 0);
+  const blocks = [];
+  dateColumns.forEach((start, position) => {
+    const nextDate = dateColumns[position + 1] ?? normalized.length;
+    const inside = (aliases, from = start + 1) => {
+      for (let index = from; index < nextDate; index++) if (aliases.some(alias => normalized[index] === alias || normalized[index].includes(alias))) return index;
+      return -1;
+    };
+    const description = inside(HEADER_ALIASES.description);
+    const amount = inside(HEADER_ALIASES.amount);
+    const debit = inside(HEADER_ALIASES.debit);
+    const credit = inside(HEADER_ALIASES.credit);
+    if (description < 0 || (amount < 0 && (debit < 0 || credit < 0))) return;
+    let end = Math.max(description, amount, debit, credit);
+    const rawHeader = source.matrix[source.headerRowIndex] || [];
+    while (end + 1 < nextDate && !isBlank(rawHeader[end + 1])) end++;
+    const title = findBlockTitle(source.matrix, source.headerRowIndex, start, end);
+    const range = `${columnLetter(start + 1)}–${columnLetter(end + 1)}`;
+    blocks.push({ start, end, value: `${start}:${end}`, label: `${range}${title ? ` · ${title}` : ""}` });
+  });
+  return blocks;
+}
+
+function findBlockTitle(matrix, headerRowIndex, start, end) {
+  for (let row = headerRowIndex - 1; row >= 0; row--) {
+    for (let column = start; column <= end; column++) {
+      const value = String(matrix[row]?.[column] ?? "").trim();
+      if (value) return value.slice(0, 50);
+    }
+  }
+  return "";
 }
 
 function renderSourceEditor(sourceKey) {
@@ -407,14 +593,28 @@ function renderSourceEditor(sourceKey) {
   refs.fileSummary.innerHTML = `<div><i data-lucide="file-spreadsheet"></i><span><strong>${escapeHtml(source.file.name)}</strong><small>${formatFileSize(source.file.size)} · ${source.rows.length.toLocaleString("es-UY")} filas detectadas</small></span></div><button class="button button-ghost button-small" type="button" data-replace-file><i data-lucide="replace"></i> Reemplazar</button>`;
   refs.fileSummary.querySelector("[data-replace-file]").addEventListener("click", () => refs.fileInput.click());
   refs.sheetSelect.innerHTML = source.sheetNames.map(name => `<option value="${escapeAttribute(name)}"${name === source.selectedSheet ? " selected" : ""}>${escapeHtml(name)}</option>`).join("");
-  const effective = getEffectiveFormat(source);
-  refs.detectionNote.innerHTML = source.formatMode === "auto"
-    ? `Formato detectado: <strong>${effective === "signed" ? "Monto con signo" : "Débito y Crédito"}</strong>`
-    : `Formato seleccionado manualmente: <strong>${effective === "signed" ? "Monto con signo" : "Débito y Crédito"}</strong>`;
+  refs.headerRow.value = source.headerRowNumber;
+  refs.dataStartRow.value = source.dataStartRow;
+  refs.dataEndRow.value = source.dataEndRow;
+  refs.dateFrom.value = source.dateFrom;
+  refs.dateTo.value = source.dateTo;
+  refs.excludedDescriptions.value = source.excludedDescriptions;
+  refs.columnBlockField.classList.toggle("hidden", source.detectedBlocks.length < 2);
+  refs.columnBlock.innerHTML = source.detectedBlocks.length >= 2
+    ? [`<option value="choose"${source.columnBlock === "choose" ? " selected" : ""}>Seleccionar tabla</option>`, ...source.detectedBlocks.map(block => `<option value="${block.value}"${source.columnBlock === block.value ? " selected" : ""}>${escapeHtml(block.label)}</option>`), `<option value="all"${source.columnBlock === "all" ? " selected" : ""}>Todas las columnas (avanzado)</option>`].join("")
+    : `<option value="all">Todas las columnas</option>`;
+  renderImportDetectionNote(source, refs.detectionNote);
   renderMappingGrid(source, refs.mappingGrid);
   renderPreview(source, refs.previewTable);
   validateSource(sourceKey);
   refreshIcons(editor);
+}
+
+function renderImportDetectionNote(source, container) {
+  const effective = getEffectiveFormat(source);
+  const format = effective === "signed" ? "Monto con signo" : "Débito y Crédito";
+  const period = source.dateFrom && source.dateTo ? ` · Período <strong>${formatDateInput(source.dateFrom)}–${formatDateInput(source.dateTo)}</strong>${source.periodSource === "sistema" ? " sugerido desde el sistema" : source.periodSource === "archivo" ? " detectado en el archivo" : ""}` : "";
+  container.innerHTML = `${source.formatMode === "auto" ? "Formato detectado" : "Formato seleccionado"}: <strong>${format}</strong> · Encabezados en fila <strong>${source.headerRowNumber}</strong>${period}`;
 }
 
 function renderMappingGrid(source, container) {
@@ -425,7 +625,7 @@ function renderMappingGrid(source, container) {
   container.innerHTML = fields.map(field => {
     const required = field !== "status";
     const options = [`<option value="">${required ? "Seleccionar columna" : "No utilizar"}</option>`]
-      .concat(source.headers.map((header, index) => `<option value="${index}"${source.mapping[field] === String(index) ? " selected" : ""}>${escapeHtml(header)}</option>`));
+      .concat(source.headers.map((header, index) => `<option value="${index}"${source.mapping[field] === String(index) ? " selected" : ""}>${columnLetter(index + 1)} · ${escapeHtml(header)}</option>`));
     return `<label class="field ${required ? "required" : ""}"><span>${FIELD_LABELS[field]}</span><select data-map-field="${field}">${options.join("")}</select></label>`;
   }).join("");
   container.querySelectorAll("[data-map-field]").forEach(select => {
@@ -438,7 +638,16 @@ function renderMappingGrid(source, container) {
 
 function renderPreview(source, table) {
   const rows = source.rows.slice(0, 10);
-  table.innerHTML = `<thead><tr><th class="row-number">Fila</th>${source.headers.map(header => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead><tbody>${rows.map(row => `<tr><td class="row-number">${row.excelRow}</td>${row.values.map(value => `<td title="${escapeAttribute(displayOriginalValue(value))}">${escapeHtml(displayOriginalValue(value) || "—")}</td>`).join("")}</tr>`).join("")}</tbody>`;
+  const mappedColumns = new Set(Object.values(source.mapping).filter(value => value !== "").map(Number));
+  table.innerHTML = `<thead><tr><th class="row-number">Fila</th>${source.headers.map((header, index) => `<th class="${mappedColumns.has(index) ? "mapped-column" : ""}"><small>${columnLetter(index + 1)}</small>${escapeHtml(header)}</th>`).join("")}</tr></thead><tbody>${rows.map(row => `<tr><td class="row-number">${row.excelRow}</td>${row.values.map((value, index) => { const displayed = displayPreviewValue(source, value, index); return `<td class="${mappedColumns.has(index) ? "mapped-column" : ""}" title="${escapeAttribute(displayed)}">${escapeHtml(displayed || "—")}</td>`; }).join("")}</tr>`).join("")}</tbody>`;
+}
+
+function displayPreviewValue(source, value, columnIndex) {
+  if (source.mapping.date === String(columnIndex)) {
+    const date = parseDateValue(value);
+    if (date) return formatDate(date);
+  }
+  return displayOriginalValue(value);
 }
 
 function validateSource(sourceKey) {
@@ -447,8 +656,11 @@ function validateSource(sourceKey) {
   const warnings = [];
   const invalidRows = [];
   const movements = [];
+  let filteredRowsCount = 0;
   const effective = getEffectiveFormat(source);
   if (!source.headers.length) errors.push("No se encontró una fila de encabezados válida.");
+  if (source.detectedBlocks.length >= 2 && source.columnBlock === "choose") errors.push("Se detectaron varias tablas en la hoja. Debe seleccionar cuál desea importar.");
+  if (source.dateFrom && source.dateTo && source.dateFrom > source.dateTo) errors.push("La fecha inicial del filtro no puede ser posterior a la fecha final.");
   if (source.mapping.date === "") errors.push("No se encontró una columna de fecha válida.");
   if (source.mapping.description === "") errors.push("Debe seleccionar una columna para la descripción.");
   if (effective === "signed" && source.mapping.amount === "") errors.push("Debe seleccionar una columna para el monto.");
@@ -460,9 +672,11 @@ function validateSource(sourceKey) {
   if (!errors.length) {
     for (const row of source.rows) {
       const parsed = normalizeSourceRow(source, row, effective);
-      if (parsed.errors.length) {
+      if (parsed.skip) {
+        filteredRowsCount++;
+      } else if (parsed.errors.length) {
         invalidRows.push({ source: source.label, sheet: source.selectedSheet, row: row.excelRow, errors: parsed.errors.join(" "), values: [...row.values] });
-      } else if (!parsed.skip) {
+      } else {
         movements.push(parsed.movement);
       }
     }
@@ -472,6 +686,7 @@ function validateSource(sourceKey) {
   source.validationErrors = errors;
   source.validationWarnings = warnings;
   source.invalidRows = invalidRows;
+  source.filteredRowsCount = filteredRowsCount;
   source.movements = movements;
   source.isValid = errors.length === 0 && movements.length > 0;
   renderValidation(source);
@@ -487,8 +702,15 @@ function normalizeSourceRow(source, row, effectiveFormat) {
   const errors = [];
   const rawDate = valueAt(row, source.mapping.date);
   const rawDescription = valueAt(row, source.mapping.description);
+  const mappedAmounts = effectiveFormat === "signed"
+    ? [valueAt(row, source.mapping.amount)]
+    : [valueAt(row, source.mapping.debit), valueAt(row, source.mapping.credit)];
+  if ([rawDate, rawDescription, ...mappedAmounts].every(isBlank)) return { errors: [], skip: true, skipReason: "empty-mapped-fields", movement: null };
+  const excludedDescriptions = new Set(String(source.excludedDescriptions || "").split(",").map(normalizeHeader).filter(Boolean));
+  if (excludedDescriptions.has(normalizeHeader(rawDescription))) return { errors: [], skip: true, skipReason: "excluded-description", movement: null };
   const date = parseDateValue(rawDate);
   const description = String(rawDescription ?? "").trim();
+  if (date && !isDateWithinSourceFilter(date, source)) return { errors: [], skip: true, skipReason: "outside-date-range", movement: null };
   if (rawDate === "" || rawDate === null || rawDate === undefined) errors.push(`La fila ${row.excelRow} no contiene fecha.`);
   else if (!date) errors.push(`La fila ${row.excelRow} contiene una fecha no reconocida.`);
   if (!description) errors.push(`La fila ${row.excelRow} no contiene descripción.`);
@@ -554,7 +776,9 @@ function renderValidation(source) {
   let type = "success";
   let icon = "circle-check";
   let title = `${source.movements.length.toLocaleString("es-UY")} movimientos válidos`;
-  let body = "El mapeo está listo para continuar.";
+  let body = source.filteredRowsCount
+    ? `El mapeo está listo. Se omitieron ${source.filteredRowsCount.toLocaleString("es-UY")} filas por rango, período, otra tabla o descripción excluida.`
+    : "El mapeo está listo para continuar.";
   let details = [];
   if (source.validationErrors.length) {
     type = "error"; icon = "circle-x"; title = "El formato necesita correcciones";
@@ -567,6 +791,13 @@ function renderValidation(source) {
   const invalidButton = box.querySelector("[data-download-invalid]");
   if (invalidButton) invalidButton.addEventListener("click", () => downloadInvalidRows(source));
   refreshIcons(box);
+}
+
+function isDateWithinSourceFilter(date, source) {
+  const key = toDateKey(date);
+  if (source.dateFrom && key < source.dateFrom) return false;
+  if (source.dateTo && key > source.dateTo) return false;
+  return true;
 }
 
 function downloadInvalidRows(source) {
@@ -764,7 +995,7 @@ function populateConfigForm() {
 
 function readConfigForm() {
   const data = new FormData(dom.configForm);
-  const numberFields = ["dateTolerance", "amountAbsTolerance", "amountPercentTolerance", "maxGroupSize", "maxCombinations", "autoThreshold", "possibleThreshold"];
+  const numberFields = ["dateTolerance", "amountAbsTolerance", "amountPercentTolerance", "maxGroupSize", "maxPairComparisons", "maxCombinations", "autoThreshold", "possibleThreshold"];
   const checkboxFields = ["requireSameSign", "invertBetweenTables", "searchOneToOne", "searchOneToMany", "searchManyToOne", "considerDescription", "ignoreCase", "ignoreAccents", "ignorePunctuation", "excludeReconciled"];
   numberFields.forEach(key => { state.config[key] = Number(data.get(key)); });
   checkboxFields.forEach(key => { state.config[key] = data.has(key); });
@@ -778,15 +1009,72 @@ function readConfigForm() {
 
 function updateCostWarning() {
   const warning = document.getElementById("costWarning");
+  const estimate = estimateIndexedPairWorkload(state.sources.system.movements, state.sources.bank.movements, state.config);
   const complexity = state.config.maxGroupSize * state.config.maxCombinations;
-  const risky = state.config.maxGroupSize > 8 || state.config.maxCombinations > 100000 || complexity > 800000;
+  const limitRisk = estimate.indexedPairs > state.config.maxPairComparisons;
+  const largeTables = estimate.totalMovements > 30000;
+  const risky = limitRisk || largeTables || state.config.maxGroupSize > 8 || state.config.maxCombinations > 100000 || complexity > 800000;
   warning.classList.toggle("hidden", !risky);
-  if (risky) warning.querySelector("span").textContent = "Estos límites pueden producir una búsqueda lenta. La aplicación detendrá la evaluación al alcanzar el máximo configurado.";
+  if (risky) {
+    warning.querySelector("span").textContent = limitRisk
+      ? `La estimación de ${estimate.indexedPairs.toLocaleString("es-UY")} parejas supera el límite configurado. La búsqueda se detendrá antes de bloquear el equipo.`
+      : largeTables
+        ? `Se procesarán ${estimate.totalMovements.toLocaleString("es-UY")} movimientos. El trabajo se ejecutará por ventanas de fecha y, cuando el navegador lo permita, en segundo plano.`
+        : "Estos límites pueden producir una búsqueda más lenta. El motor detendrá cada etapa al alcanzar su máximo configurado.";
+  }
+  renderWorkloadEstimate(estimate);
+}
+
+function estimateIndexedPairWorkload(systemMovements, bankMovements, config = state.config) {
+  const tolerance = Math.max(0, Math.trunc(config.dateTolerance || 0));
+  const buckets = new Map();
+  bankMovements.forEach(movement => {
+    const day = Math.round(movement.date.getTime() / DATE_MS);
+    const sign = config.requireSameSign ? Math.sign(comparisonAmountForConfig(movement, config)) : 0;
+    const key = `${day}|${sign}`;
+    buckets.set(key, (buckets.get(key) || 0) + 1);
+  });
+  let indexedPairs = 0;
+  systemMovements.forEach(movement => {
+    const day = Math.round(movement.date.getTime() / DATE_MS);
+    const sign = config.requireSameSign ? Math.sign(comparisonAmountForConfig(movement, config)) : 0;
+    for (let offset = -tolerance; offset <= tolerance; offset++) indexedPairs += buckets.get(`${day + offset}|${sign}`) || 0;
+  });
+  return {
+    totalMovements: systemMovements.length + bankMovements.length,
+    naivePairs: systemMovements.length * bankMovements.length,
+    indexedPairs,
+    reduction: systemMovements.length && bankMovements.length ? 1 - indexedPairs / Math.max(1, systemMovements.length * bankMovements.length) : 0
+  };
+}
+
+function comparisonAmountForConfig(movement, config) {
+  return movement.source === "bank" && config.invertBetweenTables ? -movement.amount : movement.amount;
+}
+
+function renderWorkloadEstimate(estimate = estimateIndexedPairWorkload(state.sources.system.movements, state.sources.bank.movements, state.config)) {
+  const container = document.getElementById("workloadEstimate");
+  if (!container) return;
+  const ratio = estimate.indexedPairs / Math.max(1, state.config.maxPairComparisons);
+  const level = ratio > 1 || estimate.totalMovements > 100000 ? "danger" : ratio > .6 || estimate.indexedPairs > 500000 || estimate.totalMovements > 30000 ? "warning" : "safe";
+  const reduction = estimate.naivePairs ? `${formatDecimal(estimate.reduction * 100, 1)}% menos` : "Sin datos";
+  container.className = `workload-estimate ${level}`;
+  container.innerHTML = [
+    ["Movimientos", estimate.totalMovements.toLocaleString("es-UY"), `${state.sources.system.movements.length.toLocaleString("es-UY")} ↔ ${state.sources.bank.movements.length.toLocaleString("es-UY")}`],
+    ["Comparación ingenua", estimate.naivePairs.toLocaleString("es-UY"), "No se ejecutará de esta forma"],
+    ["Candidatos por fecha/signo", estimate.indexedPairs.toLocaleString("es-UY"), reduction],
+    ["Ejecución", typeof Worker !== "undefined" ? "Web Worker" : "Modo compatible", `Límite ${state.config.maxPairComparisons.toLocaleString("es-UY")}`]
+  ].map(([label, value, detail]) => `<div class="workload-stat"><span>${label}</span><strong>${value}</strong><small>${detail}</small></div>`).join("");
 }
 
 function renderConfigSummary() {
   const container = document.getElementById("sourceConfigSummary");
-  container.innerHTML = [state.sources.system, state.sources.bank].map(source => `<div class="source-pill"><span><i data-lucide="${source.key === "system" ? "database" : "landmark"}"></i></span><div><strong>${escapeHtml(source.name || source.label)}</strong><small>${source.movements.length.toLocaleString("es-UY")} movimientos · ${getEffectiveFormat(source) === "signed" ? "Monto con signo" : "Débito y Crédito"} · ${source.invalidRows.length} errores omitidos</small></div></div>`).join("");
+  container.innerHTML = [state.sources.system, state.sources.bank].map(source => {
+    const selectedBlock = source.detectedBlocks.find(block => block.value === source.columnBlock);
+    const period = source.dateFrom && source.dateTo ? ` · ${formatDateInput(source.dateFrom)}–${formatDateInput(source.dateTo)}` : "";
+    return `<div class="source-pill"><span><i data-lucide="${source.key === "system" ? "database" : "landmark"}"></i></span><div><strong>${escapeHtml(source.name || source.label)}</strong><small>${source.movements.length.toLocaleString("es-UY")} movimientos · ${escapeHtml(source.selectedSheet)}${selectedBlock ? ` · ${escapeHtml(selectedBlock.label)}` : ""}${period} · ${source.invalidRows.length} errores</small></div></div>`;
+  }).join("");
+  updateCostWarning();
   refreshIcons(container);
 }
 
@@ -797,7 +1085,8 @@ function resetApplication() {
   state.sources.bank = createEmptySource("bank", "Caja o banco");
   state.config = { ...DEFAULT_CONFIG };
   state.results = createEmptyResults();
-  state.processing = { cancelled: false, running: false };
+  terminateProcessingWorker();
+  state.processing = { cancelled: false, running: false, worker: null, jobId: null };
   state.review = { tab: "confirmed", search: "", type: "all", sort: "score-desc", page: 1, selectedSystem: new Set(), selectedBank: new Set(), editingId: null };
   document.querySelectorAll("[data-source-editor]").forEach(editor => {
     editor.querySelector("[data-source-name]").value = "";
@@ -806,6 +1095,12 @@ function resetApplication() {
     editor.querySelector("[data-positive-meaning]").value = "debit";
     editor.querySelector("[data-split-convention]").value = "preserve";
     editor.querySelector("[data-allow-both]").checked = false;
+    editor.querySelector("[data-header-row]").value = "";
+    editor.querySelector("[data-data-start-row]").value = "";
+    editor.querySelector("[data-data-end-row]").value = "";
+    editor.querySelector("[data-date-from]").value = "";
+    editor.querySelector("[data-date-to]").value = "";
+    editor.querySelector("[data-excluded-descriptions]").value = "saldo inicial, totales, total";
     editor.querySelector("[data-file-summary]").classList.add("hidden");
     editor.querySelector("[data-import-workspace]").classList.add("hidden");
     toggleFormatOptions(editor, state.sources[editor.dataset.sourceEditor]);
@@ -834,26 +1129,25 @@ async function startReconciliation() {
     showToast("No se puede iniciar", "Revise el mapeo y la validación de ambas tablas.", "error");
     return;
   }
-  state.processing = { cancelled: false, running: true };
+  const estimate = estimateIndexedPairWorkload(state.sources.system.movements, state.sources.bank.movements, state.config);
+  state.processing = { cancelled: false, running: true, worker: null, jobId: `job-${Date.now()}-${Math.random().toString(16).slice(2)}` };
   state.results = createEmptyResults();
-  setProcessingProgress(2, "Preparando y normalizando las tablas…", "Validando movimientos");
+  setProcessingProgress(2, "Preparando índices de búsqueda…", `${estimate.indexedPairs.toLocaleString("es-UY")} parejas candidatas estimadas`);
   goToStep(5);
   try {
     await yieldToMain();
     if (state.processing.cancelled) return cancelProcessing();
-    setProcessingProgress(10, "Buscando coincidencias uno a uno…", `${state.sources.system.movements.length + state.sources.bank.movements.length} movimientos`);
-    if (state.config.searchOneToOne) await reconcileOneToOne();
-    if (state.processing.cancelled) return cancelProcessing();
-    setProcessingProgress(48, "Buscando agrupaciones de movimientos…", "Uno a varios");
-    if (state.config.searchOneToMany) await reconcileGroups("one-to-many");
-    if (state.processing.cancelled) return cancelProcessing();
-    setProcessingProgress(73, "Buscando agrupaciones de movimientos…", "Varios a uno");
-    if (state.config.searchManyToOne) await reconcileGroups("many-to-one");
-    if (state.processing.cancelled) return cancelProcessing();
-    setProcessingProgress(93, "Consolidando resultados…", "Calculando pendientes y totales");
-    await yieldToMain();
+    const engineResult = await runReconciliationEngine({
+      system: state.sources.system.movements,
+      bank: state.sources.bank.movements,
+      config: { ...state.config },
+      estimatedPairs: estimate.indexedPairs
+    });
+    if (state.processing.cancelled || engineResult.cancelled) return cancelProcessing();
+    state.results = hydrateEngineResult(engineResult);
     state.results.processingAt = new Date();
     state.processing.running = false;
+    terminateProcessingWorker();
     setProcessingProgress(100, "Conciliación completada", `${state.results.reconciliations.length} propuestas generadas`);
     await delay(280);
     state.review.tab = "confirmed";
@@ -862,22 +1156,55 @@ async function startReconciliation() {
     state.review.selectedBank.clear();
     renderReview();
     goToStep(6);
-    if (state.results.combinationLimitReached) {
-      showToast("Búsqueda limitada", `Se alcanzó el máximo de ${state.config.maxCombinations.toLocaleString("es-UY")} combinaciones. Puede ampliarlo y reprocesar.`, "error", 8500);
-    }
+    if (state.results.pairLimitReached) showToast("Límite de parejas alcanzado", `Se evaluó el máximo de ${state.config.maxPairComparisons.toLocaleString("es-UY")} candidatos. Puede ampliar el límite y reprocesar.`, "error", 8500);
+    if (state.results.combinationLimitReached) showToast("Límite de agrupaciones alcanzado", `Se alcanzó el máximo de ${state.config.maxCombinations.toLocaleString("es-UY")} combinaciones. Puede ampliarlo y reprocesar.`, "error", 8500);
   } catch (error) {
     console.error(error);
     state.processing.running = false;
+    terminateProcessingWorker();
     showToast("No se pudo completar la conciliación", error.message || "Ocurrió un error durante el procesamiento.", "error", 9000);
     goToStep(4);
   }
 }
 
+function requestProcessingCancellation() {
+  if (!state.processing.running || state.processing.cancelled) return;
+  state.processing.cancelled = true;
+  if (state.processing.worker && state.processing.jobId) state.processing.worker.postMessage({ type: "cancel", jobId: state.processing.jobId });
+  setProcessingProgress(Number(dom.processingPercent.textContent.replace("%", "")) || 0, "Cancelando procesamiento…", "Deteniendo el motor de conciliación");
+}
+
 function cancelProcessing() {
+  terminateProcessingWorker();
   state.processing.running = false;
   state.results = createEmptyResults();
   showToast("Procesamiento cancelado", "No se conservaron resultados parciales.", "error");
   goToStep(4);
+}
+
+function terminateProcessingWorker() {
+  if (state.processing?.worker) {
+    if (state.processing.worker._objectUrl) URL.revokeObjectURL(state.processing.worker._objectUrl);
+    state.processing.worker.terminate();
+    state.processing.worker = null;
+  }
+}
+
+function hydrateEngineResult(engineResult) {
+  const systemById = new Map(state.sources.system.movements.map(movement => [movement.id, movement]));
+  const bankById = new Map(state.sources.bank.movements.map(movement => [movement.id, movement]));
+  const reconciliations = engineResult.reconciliations.map(item => ({
+    ...item,
+    systemMovements: item.systemIds.map(id => systemById.get(id)).filter(Boolean),
+    bankMovements: item.bankIds.map(id => bankById.get(id)).filter(Boolean),
+    createdAt: new Date(item.createdAt)
+  }));
+  return {
+    ...createEmptyResults(),
+    ...engineResult,
+    reconciliations,
+    nextId: reconciliations.length + 1
+  };
 }
 
 function setProcessingProgress(percent, message, detail) {
@@ -887,6 +1214,470 @@ function setProcessingProgress(percent, message, detail) {
   dom.processingMessage.textContent = message;
   dom.processingDetail.textContent = detail;
   dom.processingBar.parentElement.setAttribute("aria-valuenow", String(value));
+}
+
+async function runReconciliationEngine(payload) {
+  const cleanPayload = {
+    ...payload,
+    system: payload.system.map(toEngineMovement),
+    bank: payload.bank.map(toEngineMovement)
+  };
+  const progress = update => setProcessingProgress(update.percent, update.message, update.detail);
+  if (typeof Worker !== "undefined" && typeof Blob !== "undefined" && typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+    try {
+      const workerSource = `${reconciliationEngine.toString()}\n(${reconciliationWorkerRuntime.toString()})();`;
+      const objectUrl = URL.createObjectURL(new Blob([workerSource], { type: "text/javascript" }));
+      const worker = new Worker(objectUrl);
+      worker._objectUrl = objectUrl;
+      state.processing.worker = worker;
+      return await new Promise((resolve, reject) => {
+        worker.onmessage = event => {
+          const message = event.data || {};
+          if (message.jobId !== state.processing.jobId) return;
+          if (message.type === "progress") progress(message.update);
+          if (message.type === "done") {
+            terminateProcessingWorker();
+            resolve({ ...message.result, engineMode: "worker" });
+          }
+          if (message.type === "error") {
+            terminateProcessingWorker();
+            reject(new Error(message.error || "El Web Worker no pudo completar la conciliación."));
+          }
+        };
+        worker.onerror = event => {
+          terminateProcessingWorker();
+          reject(new Error(event.message || "Error en el motor de conciliación."));
+        };
+        worker.postMessage({ type: "start", jobId: state.processing.jobId, payload: cleanPayload });
+      });
+    } catch (error) {
+      console.warn("No se pudo iniciar el Web Worker; se utilizará el modo compatible.", error);
+      terminateProcessingWorker();
+    }
+  }
+  const result = await reconciliationEngine(cleanPayload, progress, () => state.processing.cancelled);
+  return { ...result, engineMode: "main-thread-indexed" };
+}
+
+function toEngineMovement(movement) {
+  return {
+    id: movement.id,
+    source: movement.source,
+    row: movement.row,
+    dateTime: movement.date.getTime(),
+    description: movement.description,
+    amount: movement.amount,
+    type: movement.type
+  };
+}
+
+function reconciliationWorkerRuntime() {
+  const cancelled = new Set();
+  self.onmessage = async event => {
+    const message = event.data || {};
+    if (message.type === "cancel") {
+      cancelled.add(message.jobId);
+      return;
+    }
+    if (message.type !== "start") return;
+    try {
+      const result = await reconciliationEngine(
+        message.payload,
+        update => self.postMessage({ type: "progress", jobId: message.jobId, update }),
+        () => cancelled.has(message.jobId)
+      );
+      self.postMessage({ type: "done", jobId: message.jobId, result });
+    } catch (error) {
+      self.postMessage({ type: "error", jobId: message.jobId, error: error?.message || String(error) });
+    } finally {
+      cancelled.delete(message.jobId);
+    }
+  };
+}
+
+async function reconciliationEngine(payload, emitProgress = () => {}, shouldCancel = () => false) {
+  const DAY_MS = 86400000;
+  const config = payload.config;
+  const metrics = {
+    candidatePairs: 0,
+    evaluatedPairs: 0,
+    evaluatedCombinations: 0,
+    pairLimitReached: false,
+    combinationLimitReached: false
+  };
+  let nextId = 1;
+  const reconciliations = [];
+  const pause = () => new Promise(resolve => setTimeout(resolve, 0));
+  const clampValue = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
+  const round = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+  const comparisonAmount = movement => movement.source === "bank" && config.invertBetweenTables ? -movement.amount : movement.amount;
+  const amountTolerance = reference => Math.max(config.amountAbsTolerance, Math.abs(reference) * config.amountPercentTolerance / 100);
+  const signKey = movement => config.requireSameSign ? Math.sign(movement.comparisonAmount) : 0;
+  const dateKey = movement => `${movement.day}|${signKey(movement)}`;
+  const amountKey = movement => `${movement.day}|${signKey(movement)}|${Math.round(movement.comparisonAmount * 100)}`;
+  const formatAmount = value => new Intl.NumberFormat("es-UY", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value) || 0);
+
+  function normalizeText(value) {
+    let text = String(value ?? "").trim();
+    if (config.ignoreCase) text = text.toLowerCase();
+    if (config.ignoreAccents) text = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    if (config.ignorePunctuation) text = text.replace(/[^\p{L}\p{N}\s]/gu, " ");
+    const ignored = String(config.ignoredWords || "").split(",").map(word => word.trim()).filter(Boolean);
+    if (ignored.length) {
+      const ignoredSet = new Set(ignored.map(word => {
+        let normalized = config.ignoreAccents ? word.normalize("NFD").replace(/[\u0300-\u036f]/g, "") : word;
+        return config.ignoreCase ? normalized.toLowerCase() : normalized;
+      }));
+      text = text.split(/\s+/).filter(token => !ignoredSet.has(config.ignoreCase ? token.toLowerCase() : token)).join(" ");
+    }
+    return text.replace(/\s+/g, " ").trim();
+  }
+
+  function levenshtein(a, b) {
+    if (a.length < b.length) [a, b] = [b, a];
+    let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+    for (let i = 1; i <= a.length; i++) {
+      const current = [i];
+      for (let j = 1; j <= b.length; j++) current[j] = Math.min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      previous = current;
+    }
+    return previous[b.length];
+  }
+
+  function similarity(a, b) {
+    const left = normalizeText(a);
+    const right = normalizeText(b);
+    if (!left && !right) return 1;
+    if (!left || !right) return 0;
+    if (left === right) return 1;
+    const leftTokens = new Set(left.split(" ").filter(Boolean));
+    const rightTokens = new Set(right.split(" ").filter(Boolean));
+    const intersection = [...leftTokens].filter(token => rightTokens.has(token)).length;
+    const union = new Set([...leftTokens, ...rightTokens]).size;
+    const jaccard = union ? intersection / union : 0;
+    const maximumLength = Math.max(left.length, right.length);
+    const editSimilarity = maximumLength ? 1 - levenshtein(left, right) / maximumLength : 1;
+    const containment = left.includes(right) || right.includes(left) ? Math.min(left.length, right.length) / maximumLength : 0;
+    const leftList = left.split(" ").filter(token => token.length > 1);
+    const rightList = right.split(" ").filter(token => token.length > 1);
+    const shorter = leftList.length <= rightList.length ? leftList : rightList;
+    const longer = leftList.length <= rightList.length ? rightList : leftList;
+    const phrases = new Set(longer);
+    for (let size = 2; size <= 3; size++) for (let index = 0; index <= longer.length - size; index++) phrases.add(longer.slice(index, index + size).join(""));
+    const fuzzyCoverage = shorter.length ? shorter.reduce((sum, token) => {
+      let best = 0;
+      for (const phrase of phrases) {
+        const length = Math.max(token.length, phrase.length);
+        best = Math.max(best, length ? 1 - levenshtein(token, phrase) / length : 1);
+      }
+      return sum + best;
+    }, 0) / shorter.length : 0;
+    const compactLeft = left.replace(/\s+/g, "");
+    const compactRight = right.replace(/\s+/g, "");
+    const shorterCompact = compactLeft.length <= compactRight.length ? compactLeft : compactRight;
+    const longerCompact = compactLeft.length <= compactRight.length ? compactRight : compactLeft;
+    const compactContainment = shorterCompact.length >= 5 && longerCompact.includes(shorterCompact) ? .82 : 0;
+    return clampValue(Math.max(jaccard * .5 + editSimilarity * .35 + containment * .15, fuzzyCoverage * .85, compactContainment), 0, 1);
+  }
+
+  function references(description) {
+    return new Set((String(description).match(/\d{3,}/g) || []).map(value => value.replace(/^0+/, "") || "0"));
+  }
+
+  function referencePoints(descriptionsA, descriptionsB) {
+    const left = new Set(descriptionsA.flatMap(value => [...references(value)]));
+    const right = new Set(descriptionsB.flatMap(value => [...references(value)]));
+    if (!left.size || !right.size) return 0;
+    return [...left].some(value => right.has(value)) ? 10 : 0;
+  }
+
+  function genericDescription(description) {
+    const normalized = normalizeText(description);
+    const tokens = normalized.split(" ").filter(Boolean);
+    return tokens.length <= 1 || normalized.length < 5 || ["varios", "ajuste", "movimiento", "deposito", "caja", "banco"].includes(normalized);
+  }
+
+  function prepareMovement(movement) {
+    const dateTime = Number(movement.dateTime);
+    const prepared = { ...movement, dateTime, day: Math.round(dateTime / DAY_MS) };
+    prepared.comparisonAmount = comparisonAmount(prepared);
+    return prepared;
+  }
+
+  function calculate(systemMovements, bankMovements, type) {
+    const totalSystem = round(systemMovements.reduce((sum, movement) => sum + movement.comparisonAmount, 0));
+    const totalBank = round(bankMovements.reduce((sum, movement) => sum + movement.comparisonAmount, 0));
+    const totalBankOriginal = round(bankMovements.reduce((sum, movement) => sum + movement.amount, 0));
+    const difference = round(totalSystem - totalBank);
+    const tolerance = amountTolerance(Math.max(Math.abs(totalSystem), Math.abs(totalBank)));
+    const amountWithinTolerance = Math.abs(difference) <= tolerance + .005;
+    const amountScore = amountWithinTolerance
+      ? tolerance <= .005 ? (Math.abs(difference) <= .005 ? 45 : 0) : 45 - Math.min(5, 5 * Math.abs(difference) / Math.max(tolerance, .01))
+      : 0;
+    const dateDifferences = systemMovements.flatMap(system => bankMovements.map(bank => Math.abs(Math.round((system.dateTime - bank.dateTime) / DAY_MS))));
+    const maximumDateDifference = dateDifferences.length ? Math.max(...dateDifferences) : 0;
+    const averageDateDifference = dateDifferences.length ? dateDifferences.reduce((sum, value) => sum + value, 0) / dateDifferences.length : 0;
+    const dateWithinTolerance = maximumDateDifference <= config.dateTolerance;
+    const dateScore = dateWithinTolerance ? config.dateTolerance === 0 ? 25 : 25 * Math.max(.35, 1 - averageDateDifference / (config.dateTolerance + 1)) : 0;
+    const systemDescription = systemMovements.map(item => item.description).join(" ");
+    const bankDescription = bankMovements.map(item => item.description).join(" ");
+    const descriptionSimilarity = config.considerDescription ? similarity(systemDescription, bankDescription) : 1;
+    const refsScore = referencePoints(systemMovements.map(item => item.description), bankMovements.map(item => item.description));
+    const totalMembers = systemMovements.length + bankMovements.length;
+    let penalty = 0;
+    if (type !== "one-to-one") penalty += Math.max(0, totalMembers - 3) * 2;
+    if (systemMovements.some(item => genericDescription(item.description)) || bankMovements.some(item => genericDescription(item.description))) penalty += 3;
+    if (maximumDateDifference > 0) penalty += Math.min(5, maximumDateDifference);
+    const score = Math.round(clampValue(amountScore + dateScore + 20 * descriptionSimilarity + refsScore - penalty, 0, 100));
+    const exact = Math.abs(difference) <= .005 && dateWithinTolerance && (!config.considerDescription || descriptionSimilarity >= .9);
+    const reasons = [
+      Math.abs(difference) <= .005 ? "Los importes coinciden exactamente" : `La diferencia de importe (${formatAmount(Math.abs(difference))}) está dentro de la tolerancia`,
+      maximumDateDifference === 0 ? "Las fechas coinciden" : `Las fechas difieren hasta ${maximumDateDifference} día(s)`,
+      config.considerDescription ? `Similitud de descripciones: ${Math.round(descriptionSimilarity * 100)}%` : "La comparación de descripciones está desactivada"
+    ];
+    if (refsScore) reasons.push("Se encontraron referencias numéricas coincidentes");
+    if (type !== "one-to-one") reasons.push(`La suma de ${type === "one-to-many" ? bankMovements.length : systemMovements.length} movimientos coincide con el otro lado`);
+    return {
+      id: null,
+      type,
+      systemIds: systemMovements.map(item => item.id),
+      bankIds: bankMovements.map(item => item.id),
+      totalSystem,
+      totalBank,
+      totalBankOriginal,
+      difference,
+      amountTolerance: tolerance,
+      amountWithinTolerance,
+      dateWithinTolerance,
+      dateDifference: maximumDateDifference,
+      descriptionSimilarity,
+      score,
+      exact,
+      ambiguous: false,
+      alternativeCount: 0,
+      totalMembers,
+      status: "possible",
+      criterion: exact ? "Monto exacto, fecha compatible y descripción coincidente" : type === "one-to-one" ? "Coincidencia probable uno a uno" : "Agrupación por suma de importes",
+      reasons,
+      observation: "",
+      createdAt: Date.now(),
+      manual: false
+    };
+  }
+
+  function buildIndex(movements, keyBuilder) {
+    const index = new Map();
+    movements.forEach(movement => {
+      const key = keyBuilder(movement);
+      if (!index.has(key)) index.set(key, []);
+      index.get(key).push(movement);
+    });
+    return index;
+  }
+
+  function reserve(reconciliation, sets) {
+    reconciliation.systemIds.forEach(id => sets.system.add(id));
+    reconciliation.bankIds.forEach(id => sets.bank.add(id));
+  }
+
+  function addReconciliation(reconciliation) {
+    reconciliation.id = `CON-${String(nextId++).padStart(5, "0")}`;
+    reconciliations.push(reconciliation);
+  }
+
+  function applyAmbiguity(candidates, anchorSelector, penaltyMaximum, penaltyBase) {
+    const grouped = new Map();
+    candidates.forEach(candidate => {
+      const key = anchorSelector(candidate);
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(candidate);
+    });
+    candidates.forEach(candidate => {
+      const alternatives = (grouped.get(anchorSelector(candidate)) || []).filter(item => item !== candidate && item.score >= candidate.score - 5);
+      candidate.ambiguous = alternatives.length > 0;
+      candidate.alternativeCount = alternatives.length;
+      if (candidate.ambiguous) {
+        candidate.score = Math.max(0, candidate.score - Math.min(penaltyMaximum, penaltyBase + alternatives.length * 2));
+        candidate.reasons.push(`${alternatives.length} alternativa(s) con puntuación similar`);
+      }
+    });
+  }
+
+  async function checkpoint(percent, message, detail, force = false) {
+    if (!force && (metrics.candidatePairs + metrics.evaluatedCombinations) % 2048 !== 0) return false;
+    emitProgress({ percent, message, detail });
+    await pause();
+    return shouldCancel();
+  }
+
+  const system = payload.system.map(prepareMovement);
+  const bank = payload.bank.map(prepareMovement);
+  const reserved = { system: new Set(), bank: new Set() };
+
+  if (config.searchOneToOne) {
+    emitProgress({ percent: 7, message: "Construyendo índices por fecha, signo e importe…", detail: `${system.length + bank.length} movimientos` });
+    const bankByDate = buildIndex(bank, dateKey);
+    const bankByExactAmount = buildIndex(bank, amountKey);
+    const candidates = [];
+    const estimated = Math.max(1, payload.estimatedPairs || system.length);
+    let stopPairs = false;
+    for (let leftIndex = 0; leftIndex < system.length && !stopPairs; leftIndex++) {
+      const left = system[leftIndex];
+      const seenForLeft = new Set();
+      const inspect = right => {
+        if (seenForLeft.has(right.id)) return false;
+        seenForLeft.add(right.id);
+        metrics.candidatePairs++;
+        if (metrics.candidatePairs > config.maxPairComparisons) {
+          metrics.pairLimitReached = true;
+          stopPairs = true;
+          return true;
+        }
+        const difference = Math.abs(left.comparisonAmount - right.comparisonAmount);
+        if (difference <= amountTolerance(Math.max(Math.abs(left.comparisonAmount), Math.abs(right.comparisonAmount))) + .005) {
+          metrics.evaluatedPairs++;
+          const calculated = calculate([left], [right], "one-to-one");
+          if (calculated.amountWithinTolerance && calculated.dateWithinTolerance && calculated.score >= config.possibleThreshold) candidates.push(calculated);
+        }
+        return true;
+      };
+      for (let offset = -config.dateTolerance; offset <= config.dateTolerance && !stopPairs; offset++) {
+        const exactKey = `${left.day + offset}|${signKey(left)}|${Math.round(left.comparisonAmount * 100)}`;
+        for (const right of bankByExactAmount.get(exactKey) || []) {
+          const counted = inspect(right);
+          if (counted && metrics.candidatePairs % 2048 === 0) {
+            const progress = 8 + 46 * Math.min(1, metrics.candidatePairs / estimated);
+            if (await checkpoint(progress, "Buscando coincidencias uno a uno…", `${metrics.candidatePairs.toLocaleString("es-UY")} candidatos por fecha/signo`, true)) stopPairs = true;
+          }
+          if (stopPairs) break;
+        }
+      }
+      for (let offset = -config.dateTolerance; offset <= config.dateTolerance && !stopPairs; offset++) {
+        const key = `${left.day + offset}|${signKey(left)}`;
+        for (const right of bankByDate.get(key) || []) {
+          const counted = inspect(right);
+          if (counted && metrics.candidatePairs % 2048 === 0) {
+            const progress = 8 + 46 * Math.min(1, metrics.candidatePairs / estimated);
+            if (await checkpoint(progress, "Buscando coincidencias uno a uno…", `${metrics.candidatePairs.toLocaleString("es-UY")} candidatos por fecha/signo`, true)) stopPairs = true;
+          }
+          if (stopPairs) break;
+        }
+      }
+      if (shouldCancel()) return { cancelled: true, reconciliations: [], ...metrics };
+      if (leftIndex % 100 === 0) {
+        emitProgress({ percent: 8 + 46 * ((leftIndex + 1) / Math.max(1, system.length)), message: "Buscando coincidencias uno a uno…", detail: `${leftIndex + 1} de ${system.length} movimientos indexados` });
+        await pause();
+      }
+    }
+    const bySystem = new Map();
+    const byBank = new Map();
+    candidates.forEach(candidate => {
+      const systemId = candidate.systemIds[0];
+      const bankId = candidate.bankIds[0];
+      if (!bySystem.has(systemId)) bySystem.set(systemId, []);
+      if (!byBank.has(bankId)) byBank.set(bankId, []);
+      bySystem.get(systemId).push(candidate);
+      byBank.get(bankId).push(candidate);
+    });
+    candidates.forEach(candidate => {
+      const alternatives = [
+        ...(bySystem.get(candidate.systemIds[0]) || []).filter(item => item !== candidate && item.score >= candidate.score - 5),
+        ...(byBank.get(candidate.bankIds[0]) || []).filter(item => item !== candidate && item.score >= candidate.score - 5)
+      ];
+      candidate.ambiguous = alternatives.length > 0;
+      candidate.alternativeCount = alternatives.length;
+      if (candidate.ambiguous) {
+        candidate.score = Math.max(0, candidate.score - Math.min(15, 6 + alternatives.length * 2));
+        candidate.reasons.push(`${alternatives.length} alternativa(s) con puntuación similar`);
+      }
+    });
+    candidates.sort((a, b) => Number(b.exact) - Number(a.exact) || b.score - a.score || a.dateDifference - b.dateDifference);
+    for (const candidate of candidates) {
+      if (reserved.system.has(candidate.systemIds[0]) || reserved.bank.has(candidate.bankIds[0]) || candidate.score < config.possibleThreshold) continue;
+      candidate.status = candidate.score >= config.autoThreshold && !candidate.ambiguous ? "confirmed" : "possible";
+      addReconciliation(candidate);
+      reserve(candidate, reserved);
+    }
+  }
+
+  async function enumerateGroups(anchor, compatible, type) {
+    const results = [];
+    const target = Math.abs(anchor.comparisonAmount);
+    const tolerance = amountTolerance(target);
+    const maximumSelected = Math.min(Math.max(2, config.maxGroupSize - 1), compatible.length);
+    const members = compatible.map(item => ({ item, absoluteAmount: Math.abs(item.comparisonAmount) }));
+    const stack = [{ start: 0, selected: [], sum: 0 }];
+    while (stack.length && metrics.evaluatedCombinations < config.maxCombinations) {
+      const current = stack.pop();
+      if (current.selected.length >= 2) {
+        metrics.evaluatedCombinations++;
+        if (Math.abs(target - current.sum) <= tolerance + .005) {
+          const selectedMovements = current.selected.map(entry => entry.item);
+          const systemMovements = type === "one-to-many" ? [anchor] : selectedMovements;
+          const bankMovements = type === "one-to-many" ? selectedMovements : [anchor];
+          const calculated = calculate(systemMovements, bankMovements, type);
+          if (calculated.amountWithinTolerance && calculated.dateWithinTolerance && calculated.score >= config.possibleThreshold) results.push(calculated);
+        }
+        if (metrics.evaluatedCombinations % 1024 === 0) {
+          if (await checkpoint(type === "one-to-many" ? 70 : 88, "Buscando agrupaciones por ventanas de fecha…", `${metrics.evaluatedCombinations.toLocaleString("es-UY")} combinaciones`, true)) return { results, cancelled: true };
+        }
+      }
+      if (current.selected.length >= maximumSelected || current.start >= members.length || current.sum > target + tolerance + .005) continue;
+      for (let index = members.length - 1; index >= current.start; index--) {
+        const next = members[index];
+        const nextSum = current.sum + next.absoluteAmount;
+        if (nextSum <= target + tolerance + .005) stack.push({ start: index + 1, selected: [...current.selected, next], sum: nextSum });
+      }
+    }
+    if (metrics.evaluatedCombinations >= config.maxCombinations) metrics.combinationLimitReached = true;
+    return { results, cancelled: false };
+  }
+
+  async function searchGroups(type, progressStart, progressEnd) {
+    if (metrics.combinationLimitReached || shouldCancel()) return shouldCancel();
+    const systemRemaining = system.filter(item => !reserved.system.has(item.id));
+    const bankRemaining = bank.filter(item => !reserved.bank.has(item.id));
+    const anchors = type === "one-to-many" ? systemRemaining : bankRemaining;
+    const pool = type === "one-to-many" ? bankRemaining : systemRemaining;
+    const poolByDate = buildIndex(pool, dateKey);
+    const candidates = [];
+    for (let anchorIndex = 0; anchorIndex < anchors.length && !metrics.combinationLimitReached; anchorIndex++) {
+      const anchor = anchors[anchorIndex];
+      const compatible = [];
+      for (let offset = -config.dateTolerance; offset <= config.dateTolerance; offset++) {
+        const key = `${anchor.day + offset}|${signKey(anchor)}`;
+        for (const member of poolByDate.get(key) || []) {
+          if (Math.abs(member.comparisonAmount) <= Math.abs(anchor.comparisonAmount) + amountTolerance(Math.abs(anchor.comparisonAmount)) + .005) compatible.push(member);
+        }
+      }
+      compatible.sort((a, b) => Math.abs(Math.abs(a.comparisonAmount) - Math.abs(anchor.comparisonAmount)) - Math.abs(Math.abs(b.comparisonAmount) - Math.abs(anchor.comparisonAmount)));
+      if (compatible.length >= 2) {
+        const enumerated = await enumerateGroups(anchor, compatible.slice(0, 24), type);
+        candidates.push(...enumerated.results);
+        if (enumerated.cancelled) return true;
+      }
+      if (anchorIndex % 20 === 0 || anchorIndex === anchors.length - 1) {
+        emitProgress({ percent: progressStart + (progressEnd - progressStart) * ((anchorIndex + 1) / Math.max(1, anchors.length)), message: "Buscando agrupaciones por ventanas de fecha…", detail: `${anchorIndex + 1} de ${anchors.length} movimientos base` });
+        await pause();
+        if (shouldCancel()) return true;
+      }
+    }
+    applyAmbiguity(candidates, candidate => type === "one-to-many" ? candidate.systemIds[0] : candidate.bankIds[0], 18, 8);
+    candidates.sort((a, b) => b.score - a.score || a.totalMembers - b.totalMembers || a.dateDifference - b.dateDifference);
+    for (const candidate of candidates) {
+      if (candidate.systemIds.some(id => reserved.system.has(id)) || candidate.bankIds.some(id => reserved.bank.has(id)) || candidate.score < config.possibleThreshold) continue;
+      candidate.status = candidate.score >= config.autoThreshold && !candidate.ambiguous ? "confirmed" : "possible";
+      addReconciliation(candidate);
+      reserve(candidate, reserved);
+    }
+    return false;
+  }
+
+  if (config.searchOneToMany && await searchGroups("one-to-many", 56, 74)) return { cancelled: true, reconciliations: [], ...metrics };
+  if (config.searchManyToOne && await searchGroups("many-to-one", 75, 92)) return { cancelled: true, reconciliations: [], ...metrics };
+  emitProgress({ percent: 96, message: "Consolidando resultados…", detail: `${reconciliations.length} conciliaciones propuestas` });
+  await pause();
+  return { cancelled: false, reconciliations, ...metrics };
 }
 
 async function reconcileOneToOne() {
@@ -1531,13 +2322,18 @@ function exportWorkbook() {
       ["Tolerancia absoluta de monto", state.config.amountAbsTolerance],
       ["Tolerancia porcentual de monto", state.config.amountPercentTolerance / 100],
       ["Máximo por agrupación", state.config.maxGroupSize],
-      ["Máximo de combinaciones", state.config.maxCombinations],
+      ["Límite de parejas candidatas", state.config.maxPairComparisons],
+      ["Límite de combinaciones agrupadas", state.config.maxCombinations],
       ["Comparar signos obligatoriamente", yesNo(state.config.requireSameSign)],
       ["Convención invertida entre tablas", yesNo(state.config.invertBetweenTables)],
       ["Nivel automático", state.config.autoThreshold],
       ["Nivel posible", state.config.possibleThreshold],
-      ["Combinaciones evaluadas", state.results.evaluatedCombinations],
-      ["Límite de combinaciones alcanzado", yesNo(state.results.combinationLimitReached)]
+      ["Motor de procesamiento", state.results.engineMode === "worker" ? "Web Worker indexado" : "Motor indexado compatible"],
+      ["Parejas candidatas inspeccionadas", state.results.candidatePairs],
+      ["Parejas puntuadas", state.results.evaluatedPairs],
+      ["Combinaciones agrupadas evaluadas", state.results.evaluatedCombinations],
+      ["Límite de parejas alcanzado", yesNo(state.results.pairLimitReached)],
+      ["Límite de agrupaciones alcanzado", yesNo(state.results.combinationLimitReached)]
     ];
     const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
     styleSummarySheet(summarySheet);
@@ -1604,7 +2400,14 @@ function pendingExportRow(item) {
 }
 
 function createOriginalDataSheet(source) {
-  const rows = [source.headers, ...source.rows.map(row => row.values.map(value => value instanceof Date ? formatDate(value) : value))];
+  const dateColumn = source.mapping.date === "" ? -1 : Number(source.mapping.date);
+  const rows = source.matrix.map((row, rowIndex) => row.map((value, columnIndex) => {
+    if (rowIndex >= source.dataStartRow - 1 && columnIndex === dateColumn) {
+      const date = parseDateValue(value);
+      if (date) return formatDate(date);
+    }
+    return value instanceof Date ? formatDate(value) : value;
+  }));
   const worksheet = XLSX.utils.aoa_to_sheet(rows);
   applyTableSheetStyle(worksheet, { fill: "FFFFFF", numericColumns: [] });
   return worksheet;
@@ -1724,6 +2527,11 @@ function formatDecimal(value, digits = 2) {
 function formatDate(date) {
   if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
   return new Intl.DateTimeFormat("es-UY", { timeZone: "UTC", day: "2-digit", month: "2-digit", year: "numeric" }).format(date);
+}
+
+function formatDateInput(value) {
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : String(value || "");
 }
 
 function formatDateTime(date) {

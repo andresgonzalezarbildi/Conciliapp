@@ -3,28 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-
-  <meta
-    name="description"
-    content="Herramienta local para conciliación de movimientos contables, de caja y banco."
-  >
-
+  <meta name="description" content="Herramienta local para conciliación de movimientos contables, de caja y banco.">
   <title>Conciliación contable</title>
-
-  <link rel="stylesheet" href="./styles.css">
-  <link rel="icon" type="image/png" href="./favicon.png">
-
-  <script
-    defer
-    src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"
-  ></script>
-
-  <script
-    defer
-    src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"
-  ></script>
-
-  <script defer src="./app.js"></script>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+  <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script defer src="app.js"></script>
 </head>
 <body>
   <header class="app-header">
@@ -36,6 +20,7 @@
       </div>
     </div>
     <div class="header-actions">
+      <a class="hub-link" href="https://andresgonzalez.netlify.app/" title="Volver al inicio" aria-label="Volver al hub inicial"><i data-lucide="layout-grid"></i><span>Inicio</span></a>
       <span class="privacy-chip"><i data-lucide="shield-check"></i> Procesamiento local</span>
       <button id="newReconciliationBtn" class="button button-ghost button-small" type="button">
         <i data-lucide="rotate-ccw"></i> Nueva conciliación
@@ -86,7 +71,7 @@
 
       <section class="step-panel" data-panel="2">
         <div class="section-heading">
-          <div><span class="step-kicker">Paso 2 de 7</span><h1>Movimientos del sistema contable</h1><p>Cargue el archivo emitido por el sistema y confirme cómo deben interpretarse sus columnas.</p></div>
+          <div><span class="step-kicker">Paso 2 de 7</span><h1>Movimientos del sistema contable</h1><p>Cargue el archivo emitido por el sistema completo. La aplicación puede localizar encabezados aunque existan títulos o datos auxiliares.</p></div>
           <button class="button button-quiet" type="button" data-open-formats><i data-lucide="circle-help"></i> Formato esperado</button>
         </div>
         <div class="source-editor" data-source-editor="system">
@@ -107,9 +92,18 @@
               <label class="field compact"><span>Hoja</span><select data-sheet-select></select></label>
               <span class="detection-note" data-detection-note></span>
             </div>
+            <div class="import-options">
+              <label class="field"><span>Fila de encabezados</span><input data-header-row type="number" min="1" step="1"></label>
+              <label class="field"><span>Primera fila de datos</span><input data-data-start-row type="number" min="1" step="1"></label>
+              <label class="field"><span>Última fila <small>opcional</small></span><input data-data-end-row type="number" min="1" step="1" placeholder="Hasta el final"></label>
+              <label class="field column-block-field hidden" data-column-block-field><span>Tabla dentro de la hoja</span><select data-column-block></select></label>
+              <label class="field"><span>Fecha desde <small>opcional</small></span><input data-date-from type="date"></label>
+              <label class="field"><span>Fecha hasta <small>opcional</small></span><input data-date-to type="date"></label>
+              <label class="field import-option-wide"><span>Omitir descripciones exactas <small>separadas por coma</small></span><input data-excluded-descriptions type="text" placeholder="Ej.: saldo inicial, totales"></label>
+            </div>
             <div class="mapping-grid" data-mapping-grid></div>
             <div class="validation-box" data-validation-box></div>
-            <div class="preview-block"><div class="subheading"><div><h2>Vista previa</h2><p>Primeras 10 filas del archivo.</p></div></div><div class="table-scroll"><table class="data-table preview-table" data-preview-table></table></div></div>
+            <div class="preview-block"><div class="subheading"><div><h2>Vista previa</h2><p>Primeras 10 filas del rango seleccionado.</p></div></div><div class="table-scroll"><table class="data-table preview-table" data-preview-table></table></div></div>
           </div>
         </div>
         <div class="step-actions"><button class="button button-secondary" data-go-step="1" type="button"><i data-lucide="arrow-left"></i> Volver</button><button id="continueSystemBtn" class="button button-primary" type="button" disabled>Continuar <i data-lucide="arrow-right"></i></button></div>
@@ -117,7 +111,7 @@
 
       <section class="step-panel" data-panel="3">
         <div class="section-heading">
-          <div><span class="step-kicker">Paso 3 de 7</span><h1>Movimientos de caja o banco</h1><p>Cargue la segunda tabla. La validación y la convención de signos se aplican de forma independiente.</p></div>
+          <div><span class="step-kicker">Paso 3 de 7</span><h1>Movimientos de caja o banco</h1><p>Cargue el libro completo y seleccione la hoja, tabla y período que correspondan al mayor.</p></div>
           <button class="button button-quiet" type="button" data-open-formats><i data-lucide="circle-help"></i> Formato esperado</button>
         </div>
         <div class="source-editor" data-source-editor="bank">
@@ -138,9 +132,18 @@
               <label class="field compact"><span>Hoja</span><select data-sheet-select></select></label>
               <span class="detection-note" data-detection-note></span>
             </div>
+            <div class="import-options">
+              <label class="field"><span>Fila de encabezados</span><input data-header-row type="number" min="1" step="1"></label>
+              <label class="field"><span>Primera fila de datos</span><input data-data-start-row type="number" min="1" step="1"></label>
+              <label class="field"><span>Última fila <small>opcional</small></span><input data-data-end-row type="number" min="1" step="1" placeholder="Hasta el final"></label>
+              <label class="field column-block-field hidden" data-column-block-field><span>Tabla dentro de la hoja</span><select data-column-block></select></label>
+              <label class="field"><span>Fecha desde <small>opcional</small></span><input data-date-from type="date"></label>
+              <label class="field"><span>Fecha hasta <small>opcional</small></span><input data-date-to type="date"></label>
+              <label class="field import-option-wide"><span>Omitir descripciones exactas <small>separadas por coma</small></span><input data-excluded-descriptions type="text" placeholder="Ej.: saldo inicial, totales"></label>
+            </div>
             <div class="mapping-grid" data-mapping-grid></div>
             <div class="validation-box" data-validation-box></div>
-            <div class="preview-block"><div class="subheading"><div><h2>Vista previa</h2><p>Primeras 10 filas del archivo.</p></div></div><div class="table-scroll"><table class="data-table preview-table" data-preview-table></table></div></div>
+            <div class="preview-block"><div class="subheading"><div><h2>Vista previa</h2><p>Primeras 10 filas del rango seleccionado.</p></div></div><div class="table-scroll"><table class="data-table preview-table" data-preview-table></table></div></div>
           </div>
         </div>
         <div class="step-actions"><button class="button button-secondary" data-go-step="2" type="button"><i data-lucide="arrow-left"></i> Volver</button><button id="continueBankBtn" class="button button-primary" type="button" disabled>Continuar <i data-lucide="arrow-right"></i></button></div>
@@ -161,7 +164,8 @@
           </div></fieldset>
           <fieldset class="config-section"><legend>Búsqueda y agrupaciones</legend><div class="config-grid">
             <label class="field"><span>Máximo por agrupación</span><input name="maxGroupSize" type="number" min="2" max="12" step="1"></label>
-            <label class="field"><span>Máximo de combinaciones</span><input name="maxCombinations" type="number" min="100" max="500000" step="100"></label>
+            <label class="field"><span>Límite de parejas candidatas</span><input name="maxPairComparisons" type="number" min="1000" max="10000000" step="1000"></label>
+            <label class="field"><span>Límite de combinaciones agrupadas</span><input name="maxCombinations" type="number" min="100" max="1000000" step="100"></label>
             <label class="check-field full"><input name="searchOneToOne" type="checkbox"><span>Buscar coincidencias uno a uno</span></label>
             <label class="check-field full"><input name="searchOneToMany" type="checkbox"><span>Buscar coincidencias uno a varios</span></label>
             <label class="check-field full"><input name="searchManyToOne" type="checkbox"><span>Buscar coincidencias varios a uno</span></label>
@@ -180,6 +184,7 @@
           </div></fieldset>
         </form>
         <div class="config-summary" id="sourceConfigSummary"></div>
+        <div class="workload-estimate" id="workloadEstimate" aria-live="polite"></div>
         <div class="step-actions"><button class="button button-secondary" data-go-step="3" type="button"><i data-lucide="arrow-left"></i> Volver</button><button id="processBtn" class="button button-primary" type="button"><i data-lucide="play"></i> Ejecutar conciliación</button></div>
       </section>
 
