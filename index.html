@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Herramienta local para conciliación de movimientos contables, de caja y banco.">
+  <title>Conciliación contable</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+  <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><i data-lucide="landmark"></i></span>
+      <div>
+        <strong>Conciliación contable</strong>
+        <span>Herramienta de control administrativo</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span class="privacy-chip"><i data-lucide="shield-check"></i> Procesamiento local</span>
+      <button id="newReconciliationBtn" class="button button-ghost button-small" type="button">
+        <i data-lucide="rotate-ccw"></i> Nueva conciliación
+      </button>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <nav class="progress-nav" aria-label="Progreso de la conciliación">
+      <ol id="progressSteps">
+        <li class="active" data-step="1"><span>1</span><small>Inicio</small></li>
+        <li data-step="2"><span>2</span><small>Sistema</small></li>
+        <li data-step="3"><span>3</span><small>Caja / banco</small></li>
+        <li data-step="4"><span>4</span><small>Configuración</small></li>
+        <li data-step="5"><span>5</span><small>Proceso</small></li>
+        <li data-step="6"><span>6</span><small>Revisión</small></li>
+        <li data-step="7"><span>7</span><small>Exportación</small></li>
+      </ol>
+    </nav>
+
+    <main id="mainContent" class="workspace">
+      <section class="step-panel active" data-panel="1">
+        <div class="intro-layout">
+          <div class="intro-copy">
+            <div class="eyebrow"><i data-lucide="scale"></i> Control de movimientos</div>
+            <h1>Conciliación contable</h1>
+            <p class="lead">Compare los movimientos del sistema contable con una planilla de caja o banco, revise las coincidencias propuestas y exporte el resultado a Excel.</p>
+            <div class="privacy-notice">
+              <i data-lucide="lock-keyhole"></i>
+              <div><strong>Sus archivos permanecen en este equipo.</strong><span>No se envían movimientos ni importes a ningún servidor y no se guardan en el navegador.</span></div>
+            </div>
+            <div class="button-row">
+              <button id="startBtn" class="button button-primary" type="button">Comenzar conciliación <i data-lucide="arrow-right"></i></button>
+              <button class="button button-secondary" type="button" data-open-formats><i data-lucide="table-properties"></i> Ver formatos admitidos</button>
+            </div>
+          </div>
+          <aside class="process-summary" aria-label="Resumen del proceso">
+            <h2>Proceso de trabajo</h2>
+            <ol>
+              <li><span><i data-lucide="file-up"></i></span><div><strong>Cargue las dos tablas</strong><small>Excel o CSV con fecha, descripción e importes.</small></div></li>
+              <li><span><i data-lucide="sliders-horizontal"></i></span><div><strong>Ajuste los criterios</strong><small>Tolerancias, signos, agrupaciones y similitud.</small></div></li>
+              <li><span><i data-lucide="git-compare-arrows"></i></span><div><strong>Revise las propuestas</strong><small>Apruebe, rechace o cree conciliaciones manuales.</small></div></li>
+              <li><span><i data-lucide="file-spreadsheet"></i></span><div><strong>Exporte el resultado</strong><small>Libro Excel con detalle, pendientes y trazabilidad.</small></div></li>
+            </ol>
+          </aside>
+        </div>
+      </section>
+
+      <section class="step-panel" data-panel="2">
+        <div class="section-heading">
+          <div><span class="step-kicker">Paso 2 de 7</span><h1>Movimientos del sistema contable</h1><p>Cargue el archivo emitido por el sistema y confirme cómo deben interpretarse sus columnas.</p></div>
+          <button class="button button-quiet" type="button" data-open-formats><i data-lucide="circle-help"></i> Formato esperado</button>
+        </div>
+        <div class="source-editor" data-source-editor="system">
+          <div class="source-basics">
+            <label class="field"><span>Nombre de la tabla <small>opcional</small></span><input data-source-name type="text" maxlength="80" placeholder="Ej.: Mayor contable julio"></label>
+            <label class="field"><span>Formato de importes</span><select data-format-mode><option value="auto">Detectar automáticamente</option><option value="signed">Monto con signo</option><option value="split">Débito y Crédito separados</option></select></label>
+            <label class="field signed-option"><span>Un monto positivo representa</span><select data-positive-meaning><option value="debit">Débito</option><option value="credit">Crédito</option></select></label>
+            <label class="field split-option hidden"><span>Tratamiento del signo</span><select data-split-convention><option value="preserve">Conservar el signo original</option><option value="invert">Invertir todos los signos</option></select></label>
+            <label class="check-field split-option hidden"><input data-allow-both type="checkbox"><span>Aceptar filas con débito y crédito simultáneos</span></label>
+          </div>
+          <div class="drop-zone" data-drop-zone tabindex="0" role="button" aria-label="Seleccionar archivo del sistema contable">
+            <input data-file-input type="file" accept=".xlsx,.xls,.csv" hidden>
+            <i data-lucide="upload-cloud"></i><strong>Arrastre el archivo aquí</strong><span>o haga clic para seleccionarlo</span><small>XLSX, XLS o CSV · máximo recomendado 25 MB</small>
+          </div>
+          <div class="file-summary hidden" data-file-summary></div>
+          <div class="import-workspace hidden" data-import-workspace>
+            <div class="mapping-toolbar">
+              <label class="field compact"><span>Hoja</span><select data-sheet-select></select></label>
+              <span class="detection-note" data-detection-note></span>
+            </div>
+            <div class="mapping-grid" data-mapping-grid></div>
+            <div class="validation-box" data-validation-box></div>
+            <div class="preview-block"><div class="subheading"><div><h2>Vista previa</h2><p>Primeras 10 filas del archivo.</p></div></div><div class="table-scroll"><table class="data-table preview-table" data-preview-table></table></div></div>
+          </div>
+        </div>
+        <div class="step-actions"><button class="button button-secondary" data-go-step="1" type="button"><i data-lucide="arrow-left"></i> Volver</button><button id="continueSystemBtn" class="button button-primary" type="button" disabled>Continuar <i data-lucide="arrow-right"></i></button></div>
+      </section>
+
+      <section class="step-panel" data-panel="3">
+        <div class="section-heading">
+          <div><span class="step-kicker">Paso 3 de 7</span><h1>Movimientos de caja o banco</h1><p>Cargue la segunda tabla. La validación y la convención de signos se aplican de forma independiente.</p></div>
+          <button class="button button-quiet" type="button" data-open-formats><i data-lucide="circle-help"></i> Formato esperado</button>
+        </div>
+        <div class="source-editor" data-source-editor="bank">
+          <div class="source-basics">
+            <label class="field"><span>Nombre de la tabla <small>opcional</small></span><input data-source-name type="text" maxlength="80" placeholder="Ej.: Estado de cuenta BROU"></label>
+            <label class="field"><span>Formato de importes</span><select data-format-mode><option value="auto">Detectar automáticamente</option><option value="signed">Monto con signo</option><option value="split">Débito y Crédito separados</option></select></label>
+            <label class="field signed-option"><span>Un monto positivo representa</span><select data-positive-meaning><option value="debit">Débito</option><option value="credit">Crédito</option></select></label>
+            <label class="field split-option hidden"><span>Tratamiento del signo</span><select data-split-convention><option value="preserve">Conservar el signo original</option><option value="invert">Invertir todos los signos</option></select></label>
+            <label class="check-field split-option hidden"><input data-allow-both type="checkbox"><span>Aceptar filas con débito y crédito simultáneos</span></label>
+          </div>
+          <div class="drop-zone" data-drop-zone tabindex="0" role="button" aria-label="Seleccionar archivo de caja o banco">
+            <input data-file-input type="file" accept=".xlsx,.xls,.csv" hidden>
+            <i data-lucide="upload-cloud"></i><strong>Arrastre el archivo aquí</strong><span>o haga clic para seleccionarlo</span><small>XLSX, XLS o CSV · máximo recomendado 25 MB</small>
+          </div>
+          <div class="file-summary hidden" data-file-summary></div>
+          <div class="import-workspace hidden" data-import-workspace>
+            <div class="mapping-toolbar">
+              <label class="field compact"><span>Hoja</span><select data-sheet-select></select></label>
+              <span class="detection-note" data-detection-note></span>
+            </div>
+            <div class="mapping-grid" data-mapping-grid></div>
+            <div class="validation-box" data-validation-box></div>
+            <div class="preview-block"><div class="subheading"><div><h2>Vista previa</h2><p>Primeras 10 filas del archivo.</p></div></div><div class="table-scroll"><table class="data-table preview-table" data-preview-table></table></div></div>
+          </div>
+        </div>
+        <div class="step-actions"><button class="button button-secondary" data-go-step="2" type="button"><i data-lucide="arrow-left"></i> Volver</button><button id="continueBankBtn" class="button button-primary" type="button" disabled>Continuar <i data-lucide="arrow-right"></i></button></div>
+      </section>
+
+      <section class="step-panel" data-panel="4">
+        <div class="section-heading">
+          <div><span class="step-kicker">Paso 4 de 7</span><h1>Configuración de la conciliación</h1><p>Ajuste las tolerancias y los criterios antes de procesar. Los valores iniciales son conservadores.</p></div>
+          <button id="resetConfigBtn" class="button button-quiet" type="button"><i data-lucide="undo-2"></i> Restablecer parámetros</button>
+        </div>
+        <form id="configForm" class="config-layout">
+          <fieldset class="config-section"><legend>Fechas e importes</legend><div class="config-grid">
+            <label class="field"><span>Tolerancia de fechas <small>días</small></span><input name="dateTolerance" type="number" min="0" max="365" step="1"></label>
+            <label class="field"><span>Tolerancia absoluta</span><input name="amountAbsTolerance" type="number" min="0" step="0.01"></label>
+            <label class="field"><span>Tolerancia porcentual <small>%</small></span><input name="amountPercentTolerance" type="number" min="0" max="100" step="0.01"></label>
+            <label class="check-field full"><input name="requireSameSign" type="checkbox"><span>Comparar signos obligatoriamente</span></label>
+            <label class="check-field full"><input name="invertBetweenTables" type="checkbox"><span>Invertir la convención de signos entre las dos tablas</span></label>
+          </div></fieldset>
+          <fieldset class="config-section"><legend>Búsqueda y agrupaciones</legend><div class="config-grid">
+            <label class="field"><span>Máximo por agrupación</span><input name="maxGroupSize" type="number" min="2" max="12" step="1"></label>
+            <label class="field"><span>Máximo de combinaciones</span><input name="maxCombinations" type="number" min="100" max="500000" step="100"></label>
+            <label class="check-field full"><input name="searchOneToOne" type="checkbox"><span>Buscar coincidencias uno a uno</span></label>
+            <label class="check-field full"><input name="searchOneToMany" type="checkbox"><span>Buscar coincidencias uno a varios</span></label>
+            <label class="check-field full"><input name="searchManyToOne" type="checkbox"><span>Buscar coincidencias varios a uno</span></label>
+          </div><div id="costWarning" class="inline-warning hidden"><i data-lucide="triangle-alert"></i><span></span></div></fieldset>
+          <fieldset class="config-section"><legend>Confianza</legend><div class="config-grid">
+            <label class="field"><span>Conciliación automática <small>0–100</small></span><input name="autoThreshold" type="number" min="0" max="100" step="1"></label>
+            <label class="field"><span>Posible conciliación <small>0–100</small></span><input name="possibleThreshold" type="number" min="0" max="100" step="1"></label>
+            <label class="check-field full"><input name="considerDescription" type="checkbox"><span>Considerar similitud de descripciones</span></label>
+            <label class="check-field full"><input name="excludeReconciled" type="checkbox"><span>Excluir filas ya conciliadas cuando se haya asignado una columna Estado</span></label>
+          </div></fieldset>
+          <fieldset class="config-section"><legend>Normalización de descripciones</legend><div class="config-grid">
+            <label class="check-field"><input name="ignoreCase" type="checkbox"><span>Ignorar mayúsculas</span></label>
+            <label class="check-field"><input name="ignoreAccents" type="checkbox"><span>Ignorar tildes</span></label>
+            <label class="check-field"><input name="ignorePunctuation" type="checkbox"><span>Ignorar puntuación</span></label>
+            <label class="field full"><span>Palabras a ignorar <small>separadas por comas</small></span><input name="ignoredWords" type="text" placeholder="pago, recibo, transferencia"></label>
+          </div></fieldset>
+        </form>
+        <div class="config-summary" id="sourceConfigSummary"></div>
+        <div class="step-actions"><button class="button button-secondary" data-go-step="3" type="button"><i data-lucide="arrow-left"></i> Volver</button><button id="processBtn" class="button button-primary" type="button"><i data-lucide="play"></i> Ejecutar conciliación</button></div>
+      </section>
+
+      <section class="step-panel" data-panel="5">
+        <div class="processing-card">
+          <span class="processing-icon"><i data-lucide="scan-search"></i></span>
+          <span class="step-kicker">Paso 5 de 7</span><h1>Procesando movimientos</h1>
+          <p id="processingMessage">Preparando y normalizando las tablas…</p>
+          <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="processingBar"></span></div>
+          <div class="processing-meta"><span id="processingPercent">0%</span><span id="processingDetail">Iniciando</span></div>
+          <button id="cancelProcessBtn" class="button button-secondary" type="button">Cancelar</button>
+        </div>
+      </section>
+
+      <section class="step-panel review-panel" data-panel="6">
+        <div class="section-heading review-heading">
+          <div><span class="step-kicker">Paso 6 de 7</span><h1>Revisión de resultados</h1><p>Confirme los casos dudosos y complete las conciliaciones que deban resolverse manualmente.</p></div>
+          <button id="reprocessBtn" class="button button-quiet" type="button"><i data-lucide="refresh-cw"></i> Reprocesar</button>
+        </div>
+        <div id="summaryCards" class="summary-cards"></div>
+        <div class="review-tabs" role="tablist">
+          <button class="active" data-review-tab="confirmed" type="button"><i data-lucide="circle-check"></i> Conciliados <span data-tab-count="confirmed">0</span></button>
+          <button data-review-tab="possible" type="button"><i data-lucide="circle-help"></i> Posibles <span data-tab-count="possible">0</span></button>
+          <button data-review-tab="pending" type="button"><i data-lucide="circle-alert"></i> Pendientes <span data-tab-count="pending">0</span></button>
+        </div>
+        <div class="review-toolbar">
+          <label class="search-field"><i data-lucide="search"></i><input id="reviewSearch" type="search" placeholder="Buscar fecha, descripción, importe o ID"></label>
+          <label class="field inline"><span>Tipo</span><select id="typeFilter"><option value="all">Todos</option><option value="one-to-one">Uno a uno</option><option value="one-to-many">Uno a varios</option><option value="many-to-one">Varios a uno</option><option value="manual">Manual</option></select></label>
+          <label class="field inline"><span>Orden</span><select id="sortResults"><option value="score-desc">Mayor confianza</option><option value="score-asc">Menor confianza</option><option value="date-desc">Fecha más reciente</option><option value="date-asc">Fecha más antigua</option><option value="difference-desc">Mayor diferencia</option></select></label>
+        </div>
+        <div id="reviewContent" class="review-content"></div>
+        <div id="pagination" class="pagination"></div>
+        <div class="step-actions"><button class="button button-secondary" data-go-step="4" type="button"><i data-lucide="sliders-horizontal"></i> Ajustar configuración</button><button id="continueExportBtn" class="button button-primary" type="button">Ir a exportación <i data-lucide="arrow-right"></i></button></div>
+      </section>
+
+      <section class="step-panel" data-panel="7">
+        <div class="export-layout">
+          <div class="export-main">
+            <span class="export-icon"><i data-lucide="file-spreadsheet"></i></span><span class="step-kicker">Paso 7 de 7</span><h1>Exportar conciliación</h1><p>El libro incluirá el resumen, los casos confirmados y posibles, los pendientes, los datos originales y los errores de importación.</p>
+            <div id="exportSummary" class="export-summary"></div>
+            <button id="downloadExcelBtn" class="button button-primary button-large" type="button"><i data-lucide="download"></i> Descargar resultado en Excel</button>
+            <p class="local-reminder"><i data-lucide="shield-check"></i> El archivo se genera localmente en este navegador.</p>
+          </div>
+          <aside class="sheet-list"><h2>Hojas incluidas</h2><ol><li>Resumen</li><li>Conciliaciones</li><li>Posibles conciliaciones</li><li>Pendientes del sistema</li><li>Pendientes de caja o banco</li><li>Datos originales del sistema</li><li>Datos originales de caja o banco</li><li>Errores de importación, si existen</li></ol></aside>
+        </div>
+        <div class="step-actions"><button class="button button-secondary" data-go-step="6" type="button"><i data-lucide="arrow-left"></i> Volver a revisión</button><button id="finishNewBtn" class="button button-quiet" type="button"><i data-lucide="rotate-ccw"></i> Iniciar otra conciliación</button></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="formatsDialog" class="modal">
+    <form method="dialog" class="modal-card">
+      <div class="modal-header"><div><h2>Formatos admitidos</h2><p>La primera fila no vacía debe contener los encabezados.</p></div><button class="icon-button" value="cancel" aria-label="Cerrar"><i data-lucide="x"></i></button></div>
+      <div class="format-examples">
+        <section><div class="format-title"><span>A</span><div><strong>Monto con signo</strong><small>Configure si el signo positivo representa débito o crédito.</small></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Fecha</th><th>Descripción</th><th>Monto</th></tr></thead><tbody><tr><td>14/07/2026</td><td>Depósito caja</td><td class="amount">12.450,00</td></tr><tr><td>14/07/2026</td><td>Pago proveedor</td><td class="amount negative">−3.280,50</td></tr></tbody></table></div></section>
+        <section><div class="format-title"><span>B</span><div><strong>Débito y Crédito separados</strong><small>Cada fila debe usar una sola columna. El tipo se toma de la columna y el signo numérico se conserva.</small></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Fecha</th><th>Descripción</th><th>Débito</th><th>Crédito</th></tr></thead><tbody><tr><td>14/07/2026</td><td>Pago proveedor</td><td class="amount">3.280,50</td><td></td></tr><tr><td>14/07/2026</td><td>Depósito caja</td><td></td><td class="amount">12.450,00</td></tr></tbody></table></div></section>
+      </div>
+      <div class="accepted-note"><i data-lucide="badge-check"></i><p>Se reconocen fechas de Excel y formatos habituales como <strong>1.234,56</strong>, <strong>1,234.56</strong>, <strong>$ 1.234,56</strong> y <strong>(1.234,56)</strong>.</p></div>
+      <div class="modal-actions"><button class="button button-primary" value="default">Entendido</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="detailDialog" class="modal modal-wide"><div class="modal-card"><div class="modal-header"><div><h2 id="detailTitle">Detalle de conciliación</h2><p id="detailSubtitle"></p></div><button class="icon-button" data-close-detail aria-label="Cerrar"><i data-lucide="x"></i></button></div><div id="detailContent"></div><div class="modal-actions"><button class="button button-secondary" data-close-detail>Cerrar</button></div></div></dialog>
+
+  <dialog id="editGroupDialog" class="modal modal-wide"><div class="modal-card"><div class="modal-header"><div><h2>Editar agrupación</h2><p>Seleccione los movimientos que deben integrar cada lado.</p></div><button class="icon-button" data-close-group aria-label="Cerrar"><i data-lucide="x"></i></button></div><div id="editGroupContent" class="manual-grid"></div><div id="editGroupTotals" class="group-totals"></div><div class="modal-actions"><button class="button button-secondary" data-close-group>Cancelar</button><button id="saveGroupBtn" class="button button-primary">Guardar propuesta</button></div></div></dialog>
+
+  <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>
