@@ -1,42 +1,31 @@
 # Conciliación contable
 
-Aplicación web para comparar movimientos de un sistema contable con una planilla de caja o banco. Funciona directamente en el navegador con HTML, CSS, JavaScript y SheetJS, sin backend ni base de datos.
+Aplicación web para comparar movimientos de un sistema contable con una planilla de caja o banco. Permite importar archivos reales, revisar las coincidencias propuestas y exportar un Excel con el resultado, sin enviar la información contable a un servidor.
 
-![Vista de revisión de la conciliación](conciliacion-contable.png)
+**Link to project:** <https://andresgonzalez.netlify.app/conciliapp/>
 
-## Qué permite hacer
+![Vista de Conciliación contable](./conciliacion-contable.png)
 
-- Cargar archivos XLSX, XLS y CSV sin recortarlos previamente.
-- Elegir la hoja, el rango de filas, la tabla interna y las columnas que se deben utilizar.
-- Interpretar importes con signo o columnas separadas de Débito y Crédito.
-- Buscar coincidencias uno a uno, uno a varios y varios a uno.
-- Configurar tolerancias de fecha e importe, signos y similitud de descripciones.
-- Revisar, quitar, editar o crear conciliaciones manualmente.
-- Procesar tablas grandes mediante índices, límites de búsqueda y Web Worker cuando el navegador lo admite.
-- Exportar un archivo Excel con resumen, conciliaciones, pendientes, datos originales y errores de importación.
+## How It's Made:
 
-Los archivos se procesan en memoria y sus movimientos no se envían a un servidor ni se guardan en `localStorage`.
+**Tech used:** HTML5, CSS3, JavaScript, SheetJS, Lucide Icons, Web Workers
 
-## Puesta en marcha
+La aplicación está construida como una herramienta completamente del lado del cliente. SheetJS se utiliza para leer archivos XLSX, XLS y CSV, y también para generar el libro Excel final con hojas de resumen, conciliaciones, pendientes, datos originales y errores de importación.
 
-No requiere instalar Node.js ni configurar una base de datos.
+Como las planillas contables no siempre comienzan en la primera fila ni tienen una única tabla, el importador busca posibles encabezados, permite elegir la hoja y el bloque de columnas, y deja corregir manualmente el mapeo de fecha, descripción, monto, débito y crédito. Los valores originales se conservan para la exportación, mientras que las fechas, importes y descripciones se normalizan internamente para poder compararlos.
 
-1. Descomprime el archivo ZIP manteniendo todos los archivos en la misma carpeta.
-2. Abre `index.html` con un navegador actualizado.
-3. Carga las dos planillas y sigue los pasos de importación, configuración y revisión.
+El motor de conciliación busca coincidencias uno a uno y agrupaciones uno a varios o varios a uno. Cada propuesta recibe un puntaje basado en importe, cercanía de fecha, similitud de descripción y referencias numéricas. Los resultados claros pueden confirmarse automáticamente, mientras que los casos ambiguos quedan disponibles para revisión manual.
 
-La primera carga necesita conexión a Internet para obtener SheetJS y Lucide Icons desde sus CDN. El procesamiento de las planillas continúa realizándose localmente.
+## Optimizations
 
-## Configuración
+La primera versión comparaba potencialmente cada movimiento de una tabla contra todos los de la otra. El motor fue refactorizado para crear índices por fecha, signo e importe y trabajar solamente con movimientos dentro de la ventana configurada. En una prueba sintética de 10.000 movimientos por tabla, esto redujo 100 millones de cruces teóricos a aproximadamente 820.000 parejas candidatas.
 
-Los parámetros se pueden modificar desde el paso **Configuración** antes de cada conciliación. Sus valores iniciales están definidos al comienzo de `app.js`, dentro de `DEFAULT_CONFIG`.
+El procesamiento principal se ejecuta en un Web Worker cuando el navegador lo permite, evitando bloquear la interfaz. También se agregaron una estimación previa de carga, límites independientes para parejas y agrupaciones, procesamiento cancelable, paginación y advertencias para configuraciones costosas.
 
-| Parámetro | Valor inicial |
-| --- | ---: |
-| Tolerancia de fecha | 1 día |
-| Tolerancia absoluta de importe | 0,10 |
-| Máximo por agrupación | 8 movimientos |
-| Límite de parejas candidatas | 2.000.000 |
-| Límite de combinaciones agrupadas | 25.000 |
-| Conciliación automática | 70 puntos |
-| Posible conciliación | 55 puntos |
+## Lessons Learned:
+
+La parte más compleja no fue leer un archivo Excel, sino aceptar planillas con títulos, filas auxiliares, varias tablas y convenciones de signos diferentes sin depender de un formato rígido. Esto hizo importante combinar detección automática con controles manuales visibles.
+
+También aprendí que una conciliación contable no debería tratar una coincidencia aproximada como una certeza. Separar coincidencias confirmadas, posibles y pendientes, explicar el puntaje y permitir editar o quitar agrupaciones resultó tan importante como el algoritmo de búsqueda.
+
+Finalmente, trabajar con miles de movimientos mostró la diferencia entre optimizar solamente el tiempo de cálculo y cuidar toda la experiencia: estimar el costo, mantener la interfaz disponible, permitir cancelar y limitar las combinaciones son partes del mismo problema.
