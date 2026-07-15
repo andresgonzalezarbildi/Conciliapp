@@ -3,12 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta name="description" content="Herramienta local para conciliación de movimientos contables, de caja y banco.">
   <title>Conciliación contable</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=20260715-1">
   <script defer src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script defer src="app.js"></script>
+  <script defer src="app.js?v=20260715-1"></script>
 </head>
 <body>
   <header class="app-header">
@@ -216,12 +217,12 @@
           <label class="search-field"><i data-lucide="search"></i><input id="reviewSearch" type="search" placeholder="Buscar fecha, descripción, importe o ID"></label>
           <label class="field inline"><span id="typeFilterLabel">Tipo de conciliación</span><select id="typeFilter"><option value="all">Todos</option><option value="one-to-one">Uno a uno</option><option value="one-to-many">Uno a varios</option><option value="many-to-one">Varios a uno</option><option value="manual">Manual</option></select></label>
           <label class="field inline"><span>Orden</span><select id="sortResults"><option value="score-desc">Mayor confianza</option><option value="score-asc">Menor confianza</option><option value="date-desc">Fecha más reciente</option><option value="date-asc">Fecha más antigua</option><option value="difference-desc">Mayor diferencia</option></select></label>
-          <button id="retryPendingBtn" class="button button-secondary button-small hidden" type="button" title="Segunda pasada sólo sobre pendientes: amplía fechas y redondeos y prioriza palabras comerciales compartidas"><i data-lucide="scan-search"></i> Reanalizar pendientes</button>
-          <button id="approveAllPossibleBtn" class="button button-secondary button-small hidden" type="button"><i data-lucide="check-check"></i> Aprobar todos</button>
+          <button id="retryPendingBtn" class="button button-secondary button-small hidden" type="button" title="Configurar una búsqueda adicional sólo sobre los movimientos pendientes"><i data-lucide="scan-search"></i> Búsqueda avanzada</button>
+          <button id="approveAllPossibleBtn" class="button button-secondary button-small hidden" type="button"><i data-lucide="check-check"></i> Aprobar filtrados</button>
         </div>
-        <div class="step-actions review-actions"><button class="button button-secondary" data-go-step="4" type="button"><i data-lucide="sliders-horizontal"></i> Ajustar configuración</button><button id="continueExportBtn" class="button button-primary" type="button">Ir a exportación <i data-lucide="arrow-right"></i></button></div>
         <div id="reviewContent" class="review-content"></div>
         <div id="pagination" class="pagination"></div>
+        <div class="step-actions review-actions"><button class="button button-secondary" data-go-step="4" type="button"><i data-lucide="sliders-horizontal"></i> Ajustar configuración</button><button id="continueExportBtn" class="button button-primary" type="button">Ir a exportación <i data-lucide="arrow-right"></i></button></div>
       </section>
 
       <section class="step-panel" data-panel="7">
@@ -253,7 +254,28 @@
 
   <dialog id="detailDialog" class="modal modal-wide"><div class="modal-card"><div class="modal-header"><div><h2 id="detailTitle">Detalle de conciliación</h2><p id="detailSubtitle"></p></div><button class="icon-button" data-close-detail aria-label="Cerrar"><i data-lucide="x"></i></button></div><div id="detailContent"></div><div class="modal-actions"><button class="button button-secondary" data-close-detail>Cerrar</button></div></div></dialog>
 
-  <dialog id="editGroupDialog" class="modal modal-wide"><div class="modal-card"><div class="modal-header"><div><h2>Editar agrupación</h2><p>Seleccione los movimientos que deben integrar cada lado.</p></div><button class="icon-button" data-close-group aria-label="Cerrar"><i data-lucide="x"></i></button></div><div id="editGroupContent" class="manual-grid"></div><div id="editGroupTotals" class="group-totals"></div><div class="modal-actions"><button class="button button-secondary" data-close-group>Cancelar</button><button id="saveGroupBtn" class="button button-primary">Guardar propuesta</button></div></div></dialog>
+  <dialog id="retryDialog" class="modal">
+    <form id="retryForm" class="modal-card">
+      <div class="modal-header"><div><h2>Búsqueda avanzada de pendientes</h2><p>Esta búsqueda se aplica únicamente a movimientos que siguen pendientes. Todo resultado nuevo quedará en Posibles para que pueda revisarlo.</p></div><button class="icon-button" data-close-retry type="button" aria-label="Cerrar"><i data-lucide="x"></i></button></div>
+      <div class="retry-body">
+        <div id="retryPendingSummary" class="retry-summary"></div>
+        <div class="config-grid retry-options">
+          <label class="field"><span>Tolerancia de fechas <small>días</small></span><input name="dateTolerance" type="number" min="0" max="3660" step="1" required></label>
+          <label class="field"><span>Tolerancia absoluta de monto</span><input name="amountAbsTolerance" type="number" min="0" step="0.01" required></label>
+          <label class="field"><span>Tolerancia porcentual <small>%</small></span><input name="amountPercentTolerance" type="number" min="0" max="100" step="0.01" required></label>
+          <label class="field"><span>Similitud mínima de descripción <small>%</small></span><input name="minimumDescriptionSimilarity" type="number" min="0" max="100" step="1" required></label>
+          <label class="field"><span>Puntaje mínimo para proponer <small>0–100</small></span><input name="possibleThreshold" type="number" min="0" max="100" step="1" required></label>
+          <label class="check-field full"><input name="searchGroups" type="checkbox"><span>Buscar también agrupaciones dentro de la tolerancia de fechas</span></label>
+          <label class="check-field full"><input name="ignoreDates" type="checkbox"><span>Agregar una pasada uno a uno sin limitar por fecha</span></label>
+        </div>
+        <p class="config-help">La búsqueda sin fecha exige que el monto esté dentro de la tolerancia y que la descripción sea suficientemente similar o comparta una referencia numérica. Nunca se confirma automáticamente.</p>
+        <div class="inline-warning retry-warning"><i data-lucide="info"></i><span>Las propuestas que ya rechazó se recuerdan durante esta conciliación y no volverán a mostrarse con la misma agrupación.</span></div>
+      </div>
+      <div class="modal-actions"><button class="button button-secondary" data-close-retry type="button">Cancelar</button><button class="button button-primary" type="submit"><i data-lucide="scan-search"></i> Buscar en pendientes</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="editGroupDialog" class="modal modal-wide"><div class="modal-card"><div class="modal-header"><div><h2>Cambiar movimientos de la propuesta</h2><p>Marque las filas que deben integrar cada lado; los totales se recalculan debajo.</p></div><button class="icon-button" data-close-group type="button" aria-label="Cerrar"><i data-lucide="x"></i></button></div><div id="editGroupContent" class="manual-grid"></div><div id="editGroupTotals" class="group-totals"></div><label class="field edit-group-observation"><span>Observación <small>se incluye en el Excel exportado</small></span><input id="editGroupObservation" type="text" placeholder="Motivo del ajuste o nota para revisión"></label><div class="modal-actions"><button class="button button-secondary" data-close-group type="button">Cancelar</button><button id="saveGroupBtn" class="button button-primary" type="button">Guardar propuesta</button></div></div></dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 </body>

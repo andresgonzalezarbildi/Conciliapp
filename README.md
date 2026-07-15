@@ -18,7 +18,10 @@ Aplicación web para comparar movimientos de un sistema contable con una planill
 - Configurar tolerancias de fecha e importe, signos y similitud de descripciones.
 - Revisar, quitar, editar o crear conciliaciones manualmente.
 - Consultar resultados en tablas compactas que se reorganizan para evitar desplazamiento horizontal en pantallas medianas.
-- Reanalizar únicamente los pendientes con una segunda pasada más flexible, ampliando fechas y redondeos y priorizando palabras comerciales compartidas.
+- Ejecutar automáticamente una segunda pasada moderadamente flexible sobre los pendientes.
+- Abrir una búsqueda avanzada para ajustar fechas, montos y similitud, incluyendo propuestas uno a uno sin límite de fecha.
+- Recordar durante la sesión las agrupaciones rechazadas para no volver a proponerlas.
+- Agregar observaciones visibles que se incluyen en el Excel exportado.
 - Procesar tablas grandes mediante índices, límites de búsqueda y Web Worker cuando el navegador lo admite.
 - Exportar un archivo Excel con resumen, conciliaciones, pendientes, datos originales y errores de importación.
 

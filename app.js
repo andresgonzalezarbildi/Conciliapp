@@ -1,5 +1,7 @@
 "use strict";
 
+const APP_BUILD = "2026.07.15-1";
+
 const DEFAULT_CONFIG = Object.freeze({
   dateTolerance: 1,
   amountAbsTolerance: 0.10,
@@ -70,7 +72,9 @@ const state = {
     editSelectedSystem: new Set(),
     editSelectedBank: new Set(),
     editSearchSystem: "",
-    editSearchBank: ""
+    editSearchBank: "",
+    rejectedSignatures: new Set(),
+    rejectedProposals: []
   }
 };
 
@@ -135,6 +139,7 @@ const dom = {};
 document.addEventListener("DOMContentLoaded", initializeApplication);
 
 function initializeApplication() {
+  console.info(`ConciliApp ${APP_BUILD}`);
   cacheDom();
   bindGlobalEvents();
   bindSourceEditor("system");
@@ -161,6 +166,8 @@ function cacheDom() {
   dom.formatsDialog = document.getElementById("formatsDialog");
   dom.detailDialog = document.getElementById("detailDialog");
   dom.editGroupDialog = document.getElementById("editGroupDialog");
+  dom.retryDialog = document.getElementById("retryDialog");
+  dom.retryForm = document.getElementById("retryForm");
   dom.toastRegion = document.getElementById("toastRegion");
   dom.continueButtons = {
     system: document.getElementById("continueSystemBtn"),
@@ -215,12 +222,16 @@ function bindGlobalEvents() {
   document.getElementById("reviewSearch").addEventListener("input", event => {
     state.review.search = event.target.value.trim().toLowerCase();
     state.review.page = 1;
+    syncReviewControls();
     renderReviewContent();
+    refreshIcons(document.querySelector(".review-toolbar"));
   });
   document.getElementById("typeFilter").addEventListener("change", event => {
     state.review.type = event.target.value;
     state.review.page = 1;
+    syncReviewControls();
     renderReviewContent();
+    refreshIcons(document.querySelector(".review-toolbar"));
   });
   document.getElementById("sortResults").addEventListener("change", event => {
     state.review.sort = event.target.value;
@@ -228,7 +239,14 @@ function bindGlobalEvents() {
     renderReviewContent();
   });
   document.getElementById("approveAllPossibleBtn").addEventListener("click", approveAllPossible);
-  document.getElementById("retryPendingBtn").addEventListener("click", retryPendingReconciliation);
+  document.getElementById("retryPendingBtn").addEventListener("click", openRetryDialog);
+  document.querySelectorAll("[data-close-retry]").forEach(button => button.addEventListener("click", () => dom.retryDialog.close()));
+  dom.retryForm.addEventListener("submit", event => {
+    event.preventDefault();
+    const options = readRetryOptions();
+    dom.retryDialog.close();
+    retryPendingReconciliation(options);
+  });
   document.querySelectorAll("[data-close-detail]").forEach(button => button.addEventListener("click", () => dom.detailDialog.close()));
   document.querySelectorAll("[data-close-group]").forEach(button => button.addEventListener("click", () => dom.editGroupDialog.close()));
   document.getElementById("saveGroupBtn").addEventListener("click", saveEditedGroup);
@@ -236,6 +254,7 @@ function bindGlobalEvents() {
     if (event.key === "Escape") {
       if (dom.detailDialog.open) dom.detailDialog.close();
       if (dom.editGroupDialog.open) dom.editGroupDialog.close();
+      if (dom.retryDialog.open) dom.retryDialog.close();
     }
   });
 }
@@ -399,6 +418,7 @@ async function loadSourceFile(sourceKey, file) {
       codepage: 65001
     });
     if (!workbook.SheetNames.length) throw new Error("El archivo no contiene hojas legibles.");
+    clearRejectedProposals();
     Object.assign(source, {
       file,
       workbook,
@@ -1181,6 +1201,24 @@ function updateCostWarning() {
 }
 
 function estimateIndexedPairWorkload(systemMovements, bankMovements, config = state.config) {
+  if (config.ignoreDates) {
+    const bankBySign = new Map();
+    bankMovements.forEach(movement => {
+      const sign = config.requireSameSign ? Math.sign(comparisonAmountForConfig(movement, config)) : 0;
+      bankBySign.set(sign, (bankBySign.get(sign) || 0) + 1);
+    });
+    let indexedPairs = 0;
+    systemMovements.forEach(movement => {
+      const sign = config.requireSameSign ? Math.sign(comparisonAmountForConfig(movement, config)) : 0;
+      indexedPairs += bankBySign.get(sign) || 0;
+    });
+    return {
+      totalMovements: systemMovements.length + bankMovements.length,
+      naivePairs: systemMovements.length * bankMovements.length,
+      indexedPairs,
+      reduction: systemMovements.length && bankMovements.length ? 1 - indexedPairs / Math.max(1, systemMovements.length * bankMovements.length) : 0
+    };
+  }
   const tolerance = Math.max(0, Math.trunc(config.dateTolerance || 0));
   const buckets = new Map();
   bankMovements.forEach(movement => {
@@ -1249,7 +1287,8 @@ function resetApplication() {
     selectedSystem: new Set(), selectedBank: new Set(), editingId: null,
     editAvailableSystem: [], editAvailableBank: [],
     editSelectedSystem: new Set(), editSelectedBank: new Set(),
-    editSearchSystem: "", editSearchBank: ""
+    editSearchSystem: "", editSearchBank: "",
+    rejectedSignatures: new Set(), rejectedProposals: []
   };
   document.querySelectorAll("[data-source-editor]").forEach(editor => {
     editor.querySelector("[data-source-name]").value = "";
@@ -1305,14 +1344,17 @@ async function startReconciliation() {
       system: state.sources.system.movements,
       bank: state.sources.bank.movements,
       config: { ...state.config },
-      estimatedPairs: estimate.indexedPairs
-    });
+      estimatedPairs: estimate.indexedPairs,
+      excludedSignatures: getRejectedSignatureList()
+    }, { start: 2, end: 78, prefix: "Primera pasada" });
     if (state.processing.cancelled || engineResult.cancelled) return cancelProcessing();
     state.results = hydrateEngineResult(engineResult);
+    const automaticPass = await runAutomaticPendingPass();
+    if (state.processing.cancelled || automaticPass.cancelled) return cancelProcessing();
     state.results.processingAt = new Date();
     state.processing.running = false;
     terminateProcessingWorker();
-    setProcessingProgress(100, "Conciliación completada", `${state.results.reconciliations.length} propuestas generadas`);
+    setProcessingProgress(100, "Conciliación completada", `${state.results.reconciliations.length} propuestas · ${automaticPass.found} encontradas en la pasada flexible automática`);
     await delay(280);
     state.review.tab = "confirmed";
     state.review.page = 1;
@@ -1329,6 +1371,56 @@ async function startReconciliation() {
     showToast("No se pudo completar la conciliación", error.message || "Ocurrió un error durante el procesamiento.", "error", 9000);
     goToStep(4);
   }
+}
+
+async function runAutomaticPendingPass() {
+  const systemPending = getPendingMovements("system");
+  const bankPending = getPendingMovements("bank");
+  if (systemPending.length + bankPending.length < 2) return { found: 0, cancelled: false };
+  const relaxedConfig = {
+    ...state.config,
+    dateTolerance: Math.max(state.config.dateTolerance, 3),
+    amountAbsTolerance: Math.max(state.config.amountAbsTolerance, .5),
+    amountPercentTolerance: Math.max(state.config.amountPercentTolerance, .05),
+    possibleThreshold: Math.min(state.config.possibleThreshold, 50),
+    autoThreshold: 101,
+    minimumDescriptionSimilarity: .25,
+    relaxedDescriptionPriority: true,
+    forcePossible: true
+  };
+  const estimate = estimateIndexedPairWorkload(systemPending, bankPending, relaxedConfig);
+  const engineResult = await runReconciliationEngine({
+    system: systemPending,
+    bank: bankPending,
+    config: relaxedConfig,
+    estimatedPairs: estimate.indexedPairs,
+    excludedSignatures: getRejectedSignatureList()
+  }, { start: 79, end: 98, prefix: "Segunda pasada automática" });
+  if (engineResult.cancelled) return { found: 0, cancelled: true };
+  const hydrated = hydrateEngineResult(engineResult).reconciliations;
+  hydrated.forEach(item => {
+    item.relaxedPass = true;
+    item.automaticRelaxedPass = true;
+    item.status = "possible";
+    item.criterion = `Pasada flexible automática · ${item.criterion}`;
+    item.reasons.push("Segunda pasada automática limitada a movimientos que seguían pendientes");
+    item.reasons.push(`Tolerancias flexibles: ${relaxedConfig.dateTolerance} día(s), ${formatMoney(relaxedConfig.amountAbsTolerance)} absolutos y ${formatDecimal(relaxedConfig.amountPercentTolerance, 2)}%`);
+    addReconciliation(item);
+  });
+  mergeEngineMetrics(engineResult);
+  state.results.engineMode = `${state.results.engineMode || "indexado"} + pasada flexible automática`;
+  state.results.retryPasses.push({
+    mode: "automatic",
+    at: new Date(),
+    dateTolerance: relaxedConfig.dateTolerance,
+    amountAbsTolerance: relaxedConfig.amountAbsTolerance,
+    amountPercentTolerance: relaxedConfig.amountPercentTolerance,
+    minimumDescriptionSimilarity: relaxedConfig.minimumDescriptionSimilarity * 100,
+    possibleThreshold: relaxedConfig.possibleThreshold,
+    ignoreDates: false,
+    found: hydrated.length
+  });
+  return { found: hydrated.length, cancelled: false };
 }
 
 function requestProcessingCancellation() {
@@ -1354,7 +1446,7 @@ function cancelProcessing() {
   }
 }
 
-async function retryPendingReconciliation() {
+function openRetryDialog() {
   if (state.processing.running) return;
   const systemPending = getPendingMovements("system");
   const bankPending = getPendingMovements("bank");
@@ -1362,13 +1454,62 @@ async function retryPendingReconciliation() {
     showToast("No hay suficientes pendientes", "No quedan movimientos suficientes para realizar otra búsqueda.", "error");
     return;
   }
+  const form = dom.retryForm;
+  form.elements.namedItem("dateTolerance").value = Math.max(state.config.dateTolerance, 30);
+  form.elements.namedItem("amountAbsTolerance").value = Math.max(state.config.amountAbsTolerance, 1);
+  form.elements.namedItem("amountPercentTolerance").value = Math.max(state.config.amountPercentTolerance, .1);
+  form.elements.namedItem("minimumDescriptionSimilarity").value = 55;
+  form.elements.namedItem("possibleThreshold").value = Math.min(state.config.possibleThreshold, 45);
+  form.elements.namedItem("searchGroups").checked = state.config.searchOneToMany || state.config.searchManyToOne;
+  form.elements.namedItem("ignoreDates").checked = false;
+  document.getElementById("retryPendingSummary").innerHTML = `<strong>${systemPending.length.toLocaleString("es-UY")}</strong> pendientes del sistema · <strong>${bankPending.length.toLocaleString("es-UY")}</strong> de caja o banco · <strong>${state.review.rejectedSignatures.size.toLocaleString("es-UY")}</strong> agrupaciones rechazadas que no se repetirán`;
+  dom.retryDialog.showModal();
+  refreshIcons(dom.retryDialog);
+}
+
+function readRetryOptions() {
+  const data = new FormData(dom.retryForm);
+  return {
+    dateTolerance: clamp(Math.trunc(Number(data.get("dateTolerance")) || 0), 0, 3660),
+    amountAbsTolerance: Math.max(0, Number(data.get("amountAbsTolerance")) || 0),
+    amountPercentTolerance: clamp(Number(data.get("amountPercentTolerance")) || 0, 0, 100),
+    minimumDescriptionSimilarity: clamp(Number(data.get("minimumDescriptionSimilarity")) || 0, 0, 100),
+    possibleThreshold: clamp(Number(data.get("possibleThreshold")) || 0, 0, 100),
+    searchGroups: data.get("searchGroups") === "on",
+    ignoreDates: data.get("ignoreDates") === "on"
+  };
+}
+
+async function retryPendingReconciliation(options = {}) {
+  if (state.processing.running) return;
+  let systemPending = getPendingMovements("system");
+  let bankPending = getPendingMovements("bank");
+  if (systemPending.length + bankPending.length < 2) {
+    showToast("No hay suficientes pendientes", "No quedan movimientos suficientes para realizar otra búsqueda.", "error");
+    return;
+  }
+  const retryOptions = {
+    dateTolerance: Math.max(state.config.dateTolerance, 30),
+    amountAbsTolerance: Math.max(state.config.amountAbsTolerance, 1),
+    amountPercentTolerance: Math.max(state.config.amountPercentTolerance, .1),
+    minimumDescriptionSimilarity: 55,
+    possibleThreshold: Math.min(state.config.possibleThreshold, 45),
+    searchGroups: true,
+    ignoreDates: false,
+    ...options
+  };
   const relaxedConfig = {
     ...state.config,
-    dateTolerance: Math.max(state.config.dateTolerance, 7),
-    amountAbsTolerance: Math.max(state.config.amountAbsTolerance, 1),
-    possibleThreshold: Math.min(state.config.possibleThreshold, 45),
-    autoThreshold: Math.max(state.config.autoThreshold, 90),
-    relaxedDescriptionPriority: true
+    dateTolerance: retryOptions.dateTolerance,
+    amountAbsTolerance: retryOptions.amountAbsTolerance,
+    amountPercentTolerance: retryOptions.amountPercentTolerance,
+    possibleThreshold: retryOptions.possibleThreshold,
+    autoThreshold: 101,
+    minimumDescriptionSimilarity: retryOptions.minimumDescriptionSimilarity / 100,
+    relaxedDescriptionPriority: true,
+    forcePossible: true,
+    searchOneToMany: state.config.searchOneToMany && retryOptions.searchGroups,
+    searchManyToOne: state.config.searchManyToOne && retryOptions.searchGroups
   };
   const estimate = estimateIndexedPairWorkload(systemPending, bankPending, relaxedConfig);
   state.processing = {
@@ -1377,9 +1518,9 @@ async function retryPendingReconciliation() {
     worker: null,
     jobId: `retry-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     preserveResults: true,
-    mode: "retry-pending"
+    mode: "advanced-retry"
   };
-  setProcessingProgress(2, "Reanalizando sólo los pendientes…", `${systemPending.length + bankPending.length} movimientos · prioridad a palabras compartidas`);
+  setProcessingProgress(2, "Buscando nuevamente en los pendientes…", `${systemPending.length + bankPending.length} movimientos · parámetros personalizados`);
   goToStep(5);
   try {
     await yieldToMain();
@@ -1388,49 +1529,88 @@ async function retryPendingReconciliation() {
       system: systemPending,
       bank: bankPending,
       config: relaxedConfig,
-      estimatedPairs: estimate.indexedPairs
-    });
+      estimatedPairs: estimate.indexedPairs,
+      excludedSignatures: getRejectedSignatureList()
+    }, { start: 2, end: retryOptions.ignoreDates ? 68 : 98, prefix: "Búsqueda avanzada" });
     if (state.processing.cancelled || engineResult.cancelled) return cancelProcessing();
     const hydrated = hydrateEngineResult(engineResult).reconciliations;
     hydrated.forEach(item => {
       item.relaxedPass = true;
-      item.criterion = `Reanálisis flexible de pendientes · ${item.criterion}`;
-      item.reasons.push("Segunda pasada limitada exclusivamente a movimientos que seguían pendientes");
-      item.reasons.push(`Se amplió la tolerancia de fecha a ${relaxedConfig.dateTolerance} día(s) y la tolerancia absoluta a ${formatMoney(relaxedConfig.amountAbsTolerance)}`);
-      if (!item.observation) item.observation = "Encontrada al reanalizar pendientes";
+      item.advancedRetry = true;
+      item.status = "possible";
+      item.criterion = `Búsqueda avanzada de pendientes · ${item.criterion}`;
+      item.reasons.push("Búsqueda configurada manualmente y limitada a movimientos pendientes");
+      item.reasons.push(`Parámetros: ${relaxedConfig.dateTolerance} día(s), tolerancia ${formatMoney(relaxedConfig.amountAbsTolerance)} y ${formatDecimal(relaxedConfig.amountPercentTolerance, 2)}%`);
       addReconciliation(item);
     });
-    state.results.candidatePairs += engineResult.candidatePairs || 0;
-    state.results.evaluatedPairs += engineResult.evaluatedPairs || 0;
-    state.results.evaluatedCombinations += engineResult.evaluatedCombinations || 0;
-    state.results.limitedGroupAnchors += engineResult.limitedGroupAnchors || 0;
-    state.results.pairLimitReached ||= Boolean(engineResult.pairLimitReached);
-    state.results.combinationLimitReached ||= Boolean(engineResult.combinationLimitReached);
+    mergeEngineMetrics(engineResult);
+
+    const dateAgnostic = [];
+    if (retryOptions.ignoreDates) {
+      systemPending = getPendingMovements("system");
+      bankPending = getPendingMovements("bank");
+      if (systemPending.length && bankPending.length) {
+        const fullDateSpan = movementDateSpanDays([...systemPending, ...bankPending]);
+        const noDateConfig = {
+          ...relaxedConfig,
+          dateTolerance: 0,
+          ignoreDates: true,
+          searchOneToOne: true,
+          searchOneToMany: false,
+          searchManyToOne: false,
+          searchInternalOffsets: false,
+          forcePossible: true
+        };
+        const noDateEstimate = estimateIndexedPairWorkload(systemPending, bankPending, noDateConfig);
+        const noDateResult = await runReconciliationEngine({
+          system: systemPending,
+          bank: bankPending,
+          config: noDateConfig,
+          estimatedPairs: noDateEstimate.indexedPairs,
+          excludedSignatures: getRejectedSignatureList()
+        }, { start: 70, end: 98, prefix: "Búsqueda sin límite de fecha" });
+        if (state.processing.cancelled || noDateResult.cancelled) return cancelProcessing();
+        for (const item of hydrateEngineResult(noDateResult).reconciliations) {
+          item.relaxedPass = true;
+          item.advancedRetry = true;
+          item.dateAgnosticPass = true;
+          item.status = "possible";
+          item.criterion = `Coincidencia sin límite de fecha · ${item.criterion}`;
+          item.reasons.push(`La diferencia de fecha se ignoró deliberadamente; el rango inspeccionado fue de ${fullDateSpan} día(s)`);
+          item.reasons.push(`Se exigió al menos ${retryOptions.minimumDescriptionSimilarity}% de similitud o una referencia numérica compartida`);
+          addReconciliation(item);
+          dateAgnostic.push(item);
+        }
+        mergeEngineMetrics(noDateResult);
+      }
+    }
     state.results.processingAt = new Date();
-    state.results.engineMode = `${state.results.engineMode || "indexado"} + reanálisis flexible`;
-    if (!Array.isArray(state.results.retryPasses)) state.results.retryPasses = [];
+    state.results.engineMode = `${state.results.engineMode || "indexado"} + búsqueda avanzada`;
     state.results.retryPasses.push({
+      mode: "advanced",
       at: new Date(),
       dateTolerance: relaxedConfig.dateTolerance,
       amountAbsTolerance: relaxedConfig.amountAbsTolerance,
+      amountPercentTolerance: relaxedConfig.amountPercentTolerance,
+      minimumDescriptionSimilarity: retryOptions.minimumDescriptionSimilarity,
       possibleThreshold: relaxedConfig.possibleThreshold,
       autoThreshold: relaxedConfig.autoThreshold,
-      found: hydrated.length
+      ignoreDates: retryOptions.ignoreDates,
+      found: hydrated.length + dateAgnostic.length
     });
     state.processing.running = false;
     terminateProcessingWorker();
-    const confirmedCount = hydrated.filter(item => item.status === "confirmed").length;
-    const possibleCount = hydrated.filter(item => item.status === "possible").length;
-    setProcessingProgress(100, "Reanálisis completado", `${confirmedCount} conciliadas · ${possibleCount} posibles nuevas`);
+    const possibleCount = hydrated.length + dateAgnostic.length;
+    setProcessingProgress(100, "Búsqueda avanzada completada", `${possibleCount} posibles conciliaciones nuevas`);
     await delay(280);
-    state.review.tab = possibleCount ? "possible" : confirmedCount ? "confirmed" : "pending";
+    state.review.tab = possibleCount ? "possible" : "pending";
     state.review.page = 1;
     state.review.selectedSystem.clear();
     state.review.selectedBank.clear();
     renderReview();
     goToStep(6);
-    if (hydrated.length) showToast("Pendientes reanalizados", `Se encontraron ${confirmedCount} conciliación(es) clara(s) y ${possibleCount} posible(s).`, "success", 7000);
-    else showToast("Sin nuevas coincidencias", "La segunda pasada no encontró relaciones suficientemente consistentes.", "error", 7000);
+    if (possibleCount) showToast("Búsqueda completada", `Se agregaron ${possibleCount} propuestas a Posibles.`, "success", 6500);
+    else showToast("Sin nuevas coincidencias", "La búsqueda no encontró relaciones que cumplan los parámetros elegidos.", "error", 6500);
   } catch (error) {
     console.error(error);
     state.processing.running = false;
@@ -1440,6 +1620,57 @@ async function retryPendingReconciliation() {
     goToStep(6);
     showToast("No se pudo reanalizar", error.message || "Las conciliaciones anteriores se conservaron.", "error", 9000);
   }
+}
+
+function mergeEngineMetrics(engineResult) {
+  state.results.candidatePairs += engineResult.candidatePairs || 0;
+  state.results.evaluatedPairs += engineResult.evaluatedPairs || 0;
+  state.results.evaluatedCombinations += engineResult.evaluatedCombinations || 0;
+  state.results.limitedGroupAnchors += engineResult.limitedGroupAnchors || 0;
+  state.results.pairLimitReached ||= Boolean(engineResult.pairLimitReached);
+  state.results.combinationLimitReached ||= Boolean(engineResult.combinationLimitReached);
+}
+
+function movementDateSpanDays(movements) {
+  let minimum = Infinity;
+  let maximum = -Infinity;
+  for (const movement of movements) {
+    const timestamp = movement.date.getTime();
+    minimum = Math.min(minimum, timestamp);
+    maximum = Math.max(maximum, timestamp);
+  }
+  return Number.isFinite(minimum) ? Math.max(0, Math.ceil((maximum - minimum) / DATE_MS)) : 0;
+}
+
+function reconciliationSignatureFromIds(systemIds = [], bankIds = []) {
+  return `${[...systemIds].sort().join("|")}::${[...bankIds].sort().join("|")}`;
+}
+
+function reconciliationSignature(item) {
+  return reconciliationSignatureFromIds(item.systemIds, item.bankIds);
+}
+
+function getRejectedSignatureList() {
+  return [...state.review.rejectedSignatures];
+}
+
+function rememberRejectedProposal(item, reason) {
+  const signature = reconciliationSignature(item);
+  state.review.rejectedSignatures.add(signature);
+  if (!state.review.rejectedProposals.some(entry => entry.signature === signature)) {
+    state.review.rejectedProposals.push({
+      signature,
+      systemIds: [...item.systemIds],
+      bankIds: [...item.bankIds],
+      reason,
+      at: new Date()
+    });
+  }
+}
+
+function clearRejectedProposals() {
+  state.review.rejectedSignatures.clear();
+  state.review.rejectedProposals.length = 0;
 }
 
 function terminateProcessingWorker() {
@@ -1476,13 +1707,20 @@ function setProcessingProgress(percent, message, detail) {
   dom.processingBar.parentElement.setAttribute("aria-valuenow", String(value));
 }
 
-async function runReconciliationEngine(payload) {
+async function runReconciliationEngine(payload, progressRange = {}) {
   const cleanPayload = {
     ...payload,
     system: payload.system.map(toEngineMovement),
     bank: payload.bank.map(toEngineMovement)
   };
-  const progress = update => setProcessingProgress(update.percent, update.message, update.detail);
+  const progressStart = Number.isFinite(progressRange.start) ? progressRange.start : 0;
+  const progressEnd = Number.isFinite(progressRange.end) ? progressRange.end : 100;
+  const progressPrefix = progressRange.prefix ? `${progressRange.prefix} · ` : "";
+  const progress = update => setProcessingProgress(
+    progressStart + (progressEnd - progressStart) * clamp(Number(update.percent) || 0, 0, 100) / 100,
+    `${progressPrefix}${update.message}`,
+    update.detail
+  );
   if (typeof Worker !== "undefined" && typeof Blob !== "undefined" && typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
     try {
       const workerSource = `${reconciliationEngine.toString()}\n(${reconciliationWorkerRuntime.toString()})();`;
@@ -1558,6 +1796,7 @@ function reconciliationWorkerRuntime() {
 async function reconciliationEngine(payload, emitProgress = () => {}, shouldCancel = () => false) {
   const DAY_MS = 86400000;
   const config = payload.config;
+  const excludedSignatures = new Set(payload.excludedSignatures || []);
   const metrics = {
     candidatePairs: 0,
     evaluatedPairs: 0,
@@ -1703,8 +1942,9 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
       }
     }
     const averageDateDifference = dateComparisonCount ? totalDateDifference / dateComparisonCount : 0;
-    const dateWithinTolerance = maximumDateDifference <= config.dateTolerance;
-    const dateScore = dateWithinTolerance ? config.dateTolerance === 0 ? 25 : 25 * Math.max(.35, 1 - averageDateDifference / (config.dateTolerance + 1)) : 0;
+    const ignoreDates = Boolean(config.ignoreDates);
+    const dateWithinTolerance = ignoreDates || maximumDateDifference <= config.dateTolerance;
+    const dateScore = ignoreDates ? 0 : dateWithinTolerance ? config.dateTolerance === 0 ? 25 : 25 * Math.max(.35, 1 - averageDateDifference / (config.dateTolerance + 1)) : 0;
     const descriptionSimilarity = config.considerDescription ? groupSimilarity(systemMovements, bankMovements) : 1;
     const refsScore = referencePoints(systemMovements.map(item => item.description), bankMovements.map(item => item.description));
     const totalMembers = systemMovements.length + bankMovements.length;
@@ -1713,7 +1953,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     let penalty = 0;
     if (type !== "one-to-one" && !protectedGroupDescription) penalty += Math.min(12, Math.log2(Math.max(1, totalMembers - 2)) * 2);
     if (!protectedGroupDescription && (systemMovements.some(item => genericDescription(item.description)) || bankMovements.some(item => genericDescription(item.description)))) penalty += 3;
-    if (maximumDateDifference > 0) penalty += Math.min(5, maximumDateDifference);
+    if (!ignoreDates && maximumDateDifference > 0) penalty += Math.min(5, maximumDateDifference);
     let score = Math.round(clampValue(amountScore + dateScore + descriptionScore + refsScore - penalty, 0, 100));
     const exactAmountAndDate = Math.abs(difference) <= .005 && maximumDateDifference === 0;
     const exactAmountCompatibleDate = Math.abs(difference) <= .005 && dateWithinTolerance;
@@ -1722,7 +1962,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     const exact = Math.abs(difference) <= .005 && dateWithinTolerance && (!config.considerDescription || descriptionSimilarity >= .9 || protectedGroupDescription);
     const reasons = [
       Math.abs(difference) <= .005 ? "Los importes coinciden exactamente" : `La diferencia de importe (${formatAmount(Math.abs(difference))}) está dentro de la tolerancia`,
-      maximumDateDifference === 0 ? "Las fechas coinciden" : `Las fechas difieren hasta ${maximumDateDifference} día(s)`,
+      ignoreDates ? `La fecha se ignoró en esta búsqueda (${maximumDateDifference} día(s) de diferencia)` : maximumDateDifference === 0 ? "Las fechas coinciden" : `Las fechas difieren hasta ${maximumDateDifference} día(s)`,
       config.considerDescription ? `Similitud de descripciones: ${Math.round(descriptionSimilarity * 100)}%` : "La comparación de descripciones está desactivada"
     ];
     if (refsScore) reasons.push("Se encontraron referencias numéricas coincidentes");
@@ -1743,6 +1983,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
       dateWithinTolerance,
       dateDifference: maximumDateDifference,
       descriptionSimilarity,
+      referenceScore: refsScore,
       protectedGroupDescription,
       exactAmountAndDate,
       score,
@@ -1769,14 +2010,41 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     return index;
   }
 
+  function lowerBoundByAmount(movements, target) {
+    let low = 0;
+    let high = movements.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (movements[middle].comparisonAmount < target) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
   function reserve(reconciliation, sets) {
     reconciliation.systemIds.forEach(id => sets.system.add(id));
     reconciliation.bankIds.forEach(id => sets.bank.add(id));
   }
 
+  function proposalSignature(reconciliation) {
+    return `${[...reconciliation.systemIds].sort().join("|")}::${[...reconciliation.bankIds].sort().join("|")}`;
+  }
+
+  function candidateIsAllowed(reconciliation) {
+    if (excludedSignatures.has(proposalSignature(reconciliation))) return false;
+    const minimumDescriptionSimilarity = Number(config.minimumDescriptionSimilarity) || 0;
+    if (minimumDescriptionSimilarity > 0
+      && reconciliation.descriptionSimilarity < minimumDescriptionSimilarity
+      && !(reconciliation.referenceScore > 0)) return false;
+    return true;
+  }
+
   function addReconciliation(reconciliation) {
+    if (!candidateIsAllowed(reconciliation)) return false;
+    if (config.forcePossible) reconciliation.status = "possible";
     reconciliation.id = `CON-${String(nextId++).padStart(5, "0")}`;
     reconciliations.push(reconciliation);
+    return true;
   }
 
   function applyAmbiguity(candidates, anchorSelector, penaltyMaximum, penaltyBase) {
@@ -1809,9 +2077,11 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
   const reserved = { system: new Set(), bank: new Set() };
 
   if (config.searchOneToOne) {
-    emitProgress({ percent: 7, message: "Construyendo índices por fecha, signo e importe…", detail: `${system.length + bank.length} movimientos` });
-    const bankByDate = buildIndex(bank, dateKey);
-    const bankByExactAmount = buildIndex(bank, amountKey);
+    emitProgress({ percent: 7, message: config.ignoreDates ? "Construyendo índice por signo e importe…" : "Construyendo índices por fecha, signo e importe…", detail: `${system.length + bank.length} movimientos` });
+    const bankByDate = config.ignoreDates ? new Map() : buildIndex(bank, dateKey);
+    const bankByExactAmount = config.ignoreDates ? new Map() : buildIndex(bank, amountKey);
+    const bankBySignAndAmount = buildIndex(bank, signKey);
+    bankBySignAndAmount.forEach(items => items.sort((a, b) => a.comparisonAmount - b.comparisonAmount));
     const candidates = [];
     const estimated = Math.max(1, payload.estimatedPairs || system.length);
     let stopPairs = false;
@@ -1831,35 +2101,50 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
         if (difference <= amountTolerance(Math.max(Math.abs(left.comparisonAmount), Math.abs(right.comparisonAmount))) + .005) {
           metrics.evaluatedPairs++;
           const calculated = calculate([left], [right], "one-to-one");
-          if (calculated.amountWithinTolerance && calculated.dateWithinTolerance && calculated.score >= config.possibleThreshold) candidates.push(calculated);
+          if (calculated.amountWithinTolerance && calculated.dateWithinTolerance && calculated.score >= config.possibleThreshold && candidateIsAllowed(calculated)) candidates.push(calculated);
         }
         return true;
       };
-      for (let offset = -config.dateTolerance; offset <= config.dateTolerance && !stopPairs; offset++) {
-        const exactKey = `${left.day + offset}|${signKey(left)}|${Math.round(left.comparisonAmount * 100)}`;
-        for (const right of bankByExactAmount.get(exactKey) || []) {
-          const counted = inspect(right);
+      if (config.ignoreDates) {
+        const sorted = bankBySignAndAmount.get(signKey(left)) || [];
+        const percentage = Math.max(0, Number(config.amountPercentTolerance) || 0) / 100;
+        const percentageMargin = percentage >= 1 ? Infinity : Math.abs(left.comparisonAmount) * percentage / Math.max(1e-9, 1 - percentage);
+        const margin = Math.max(Number(config.amountAbsTolerance) || 0, percentageMargin) + .01;
+        let index = Number.isFinite(margin) ? lowerBoundByAmount(sorted, left.comparisonAmount - margin) : 0;
+        while (index < sorted.length && (!Number.isFinite(margin) || sorted[index].comparisonAmount <= left.comparisonAmount + margin) && !stopPairs) {
+          const counted = inspect(sorted[index++]);
           if (counted && metrics.candidatePairs % 2048 === 0) {
             const progress = 8 + 46 * Math.min(1, metrics.candidatePairs / estimated);
-            if (await checkpoint(progress, "Buscando coincidencias uno a uno…", `${metrics.candidatePairs.toLocaleString("es-UY")} candidatos por fecha/signo`, true)) stopPairs = true;
+            if (await checkpoint(progress, "Buscando coincidencias uno a uno sin fecha…", `${metrics.candidatePairs.toLocaleString("es-UY")} candidatos por signo e importe`, true)) stopPairs = true;
           }
-          if (stopPairs) break;
         }
-      }
-      for (let offset = -config.dateTolerance; offset <= config.dateTolerance && !stopPairs; offset++) {
-        const key = `${left.day + offset}|${signKey(left)}`;
-        for (const right of bankByDate.get(key) || []) {
-          const counted = inspect(right);
-          if (counted && metrics.candidatePairs % 2048 === 0) {
-            const progress = 8 + 46 * Math.min(1, metrics.candidatePairs / estimated);
-            if (await checkpoint(progress, "Buscando coincidencias uno a uno…", `${metrics.candidatePairs.toLocaleString("es-UY")} candidatos por fecha/signo`, true)) stopPairs = true;
+      } else {
+        for (let offset = -config.dateTolerance; offset <= config.dateTolerance && !stopPairs; offset++) {
+          const exactKey = `${left.day + offset}|${signKey(left)}|${Math.round(left.comparisonAmount * 100)}`;
+          for (const right of bankByExactAmount.get(exactKey) || []) {
+            const counted = inspect(right);
+            if (counted && metrics.candidatePairs % 2048 === 0) {
+              const progress = 8 + 46 * Math.min(1, metrics.candidatePairs / estimated);
+              if (await checkpoint(progress, "Buscando coincidencias uno a uno…", `${metrics.candidatePairs.toLocaleString("es-UY")} candidatos por fecha/signo`, true)) stopPairs = true;
+            }
+            if (stopPairs) break;
           }
-          if (stopPairs) break;
+        }
+        for (let offset = -config.dateTolerance; offset <= config.dateTolerance && !stopPairs; offset++) {
+          const key = `${left.day + offset}|${signKey(left)}`;
+          for (const right of bankByDate.get(key) || []) {
+            const counted = inspect(right);
+            if (counted && metrics.candidatePairs % 2048 === 0) {
+              const progress = 8 + 46 * Math.min(1, metrics.candidatePairs / estimated);
+              if (await checkpoint(progress, "Buscando coincidencias uno a uno…", `${metrics.candidatePairs.toLocaleString("es-UY")} candidatos por fecha/signo`, true)) stopPairs = true;
+            }
+            if (stopPairs) break;
+          }
         }
       }
       if (shouldCancel()) return { cancelled: true, reconciliations: [], ...metrics };
       if (leftIndex % 100 === 0) {
-        emitProgress({ percent: 8 + 46 * ((leftIndex + 1) / Math.max(1, system.length)), message: "Buscando coincidencias uno a uno…", detail: `${leftIndex + 1} de ${system.length} movimientos indexados` });
+        emitProgress({ percent: 8 + 46 * ((leftIndex + 1) / Math.max(1, system.length)), message: config.ignoreDates ? "Buscando coincidencias uno a uno sin fecha…" : "Buscando coincidencias uno a uno…", detail: `${leftIndex + 1} de ${system.length} movimientos indexados` });
         await pause();
       }
     }
@@ -1889,8 +2174,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     for (const candidate of candidates) {
       if (reserved.system.has(candidate.systemIds[0]) || reserved.bank.has(candidate.bankIds[0]) || candidate.score < config.possibleThreshold) continue;
       candidate.status = candidate.score >= config.autoThreshold && !candidate.ambiguous ? "confirmed" : "possible";
-      addReconciliation(candidate);
-      reserve(candidate, reserved);
+      if (addReconciliation(candidate)) reserve(candidate, reserved);
     }
   }
 
@@ -2007,13 +2291,13 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
         if (shouldCancel()) return true;
       }
     }
-    applyAmbiguity(candidates, candidate => type === "one-to-many" ? candidate.systemIds[0] : candidate.bankIds[0], 18, 8);
-    candidates.sort((a, b) => b.score - a.score || a.totalMembers - b.totalMembers || a.dateDifference - b.dateDifference);
-    for (const candidate of candidates) {
+    const eligibleCandidates = candidates.filter(candidateIsAllowed);
+    applyAmbiguity(eligibleCandidates, candidate => type === "one-to-many" ? candidate.systemIds[0] : candidate.bankIds[0], 18, 8);
+    eligibleCandidates.sort((a, b) => b.score - a.score || a.totalMembers - b.totalMembers || a.dateDifference - b.dateDifference);
+    for (const candidate of eligibleCandidates) {
       if (candidate.systemIds.some(id => reserved.system.has(id)) || candidate.bankIds.some(id => reserved.bank.has(id)) || candidate.score < config.possibleThreshold) continue;
       candidate.status = candidate.score >= config.autoThreshold && !candidate.ambiguous ? "confirmed" : "possible";
-      addReconciliation(candidate);
-      reserve(candidate, reserved);
+      if (addReconciliation(candidate)) reserve(candidate, reserved);
     }
     return false;
   }
@@ -2134,7 +2418,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
           if (anchor.id === other.id || seenPairs.has(signature)) continue;
           seenPairs.add(signature);
           const candidate = calculateInternal([anchor, other], sourceKey, "Compensación interna de Débito y Crédito");
-          if (candidate.amountWithinTolerance && candidate.dateWithinTolerance && candidate.score >= config.possibleThreshold) pairCandidates.push(candidate);
+          if (candidate.amountWithinTolerance && candidate.dateWithinTolerance && candidate.score >= config.possibleThreshold && candidateIsAllowed(candidate)) pairCandidates.push(candidate);
         }
       }
       if (index % 250 === 0) {
@@ -2165,8 +2449,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
       const ids = sourceKey === "system" ? candidate.systemIds : candidate.bankIds;
       if (ids.some(id => reservedSet.has(id)) || candidate.score < config.possibleThreshold) continue;
       candidate.status = candidate.score >= config.autoThreshold && !candidate.ambiguous ? "confirmed" : "possible";
-      addReconciliation(candidate);
-      ids.forEach(id => reservedSet.add(id));
+      if (addReconciliation(candidate)) ids.forEach(id => reservedSet.add(id));
     }
 
     const bulkRemaining = movements.filter(item => !reservedSet.has(item.id) && Math.sign(item.comparisonAmount));
@@ -2188,8 +2471,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
       candidate.bulk = true;
       candidate.reasons.push("Se comprobó el conjunto completo sin enumerar subcombinaciones");
       candidate.status = candidate.score >= config.autoThreshold ? "confirmed" : "possible";
-      addReconciliation(candidate);
-      members.forEach(item => reservedSet.add(item.id));
+      if (addReconciliation(candidate)) members.forEach(item => reservedSet.add(item.id));
     }
     emitProgress({ percent: progressEnd, message: "Compensaciones internas comprobadas…", detail: `${sourceKey === "system" ? "Sistema" : "Caja/banco"}: ${remaining.length.toLocaleString("es-UY")} movimientos inspeccionados` });
     await pause();
@@ -2614,16 +2896,16 @@ function syncReviewControls() {
   sortFilter.innerHTML = sortOptions.map(([value, label]) => `<option value="${value}"${value === state.review.sort ? " selected" : ""}>${label}</option>`).join("");
   typeLabelElement.textContent = isPending ? "Tipo de movimiento" : "Tipo de conciliación";
   searchInput.placeholder = isPending ? "Filtrar pendientes por fecha, descripción o importe" : "Buscar fecha, descripción, importe o ID";
-  const possibleCount = state.results.reconciliations.filter(item => item.status === "possible").length;
-  approveAllButton.classList.toggle("hidden", state.review.tab !== "possible" || !possibleCount);
-  approveAllButton.innerHTML = `<i data-lucide="check-check"></i> Aprobar todos (${possibleCount})`;
+  const filteredPossibleCount = state.review.tab === "possible" ? getFilteredReconciliations("possible").length : 0;
+  approveAllButton.classList.toggle("hidden", state.review.tab !== "possible" || !filteredPossibleCount);
+  approveAllButton.innerHTML = `<i data-lucide="check-check"></i> Aprobar filtrados (${filteredPossibleCount})`;
   const pendingCount = getPendingMovements("system").length + getPendingMovements("bank").length;
   retryPendingButton.classList.toggle("hidden", !isPending || pendingCount < 2 || state.processing.running);
-  retryPendingButton.innerHTML = `<i data-lucide="scan-search"></i> Reanalizar pendientes (${pendingCount})`;
+  retryPendingButton.innerHTML = `<i data-lucide="scan-search"></i> Búsqueda avanzada (${pendingCount})`;
 }
 
 function approveAllPossible() {
-  const possible = state.results.reconciliations.filter(item => item.status === "possible");
+  const possible = getFilteredReconciliations("possible");
   if (!possible.length) return;
   dom.reviewContent.querySelectorAll("[data-observation]").forEach(input => {
     const item = findReconciliation(input.dataset.observation);
@@ -2631,13 +2913,13 @@ function approveAllPossible() {
   });
   const ambiguousCount = possible.filter(item => item.ambiguous).length;
   const detail = ambiguousCount ? ` ${ambiguousCount} tienen alternativas marcadas como ambiguas.` : "";
-  if (!window.confirm(`Se aprobarán ${possible.length} conciliaciones posibles.${detail} ¿Desea continuar?`)) return;
+  if (!window.confirm(`Se aprobarán ${possible.length} conciliaciones visibles según la búsqueda y el filtro actuales.${detail} ¿Desea continuar?`)) return;
   possible.forEach(item => {
     item.status = "confirmed";
     if (!item.observation) item.observation = "Aprobada mediante acción masiva";
   });
   state.review.page = 1;
-  showToast("Conciliaciones aprobadas", `${possible.length} propuestas pasaron a conciliados.`, "success");
+  showToast("Conciliaciones aprobadas", `${possible.length} propuestas filtradas pasaron a conciliados.`, "success");
   renderReview();
 }
 
@@ -2667,11 +2949,7 @@ function renderReviewContent() {
     renderPendingReview();
     return;
   }
-  let items = state.results.reconciliations.filter(item => item.status === state.review.tab);
-  if (state.review.type !== "all") items = items.filter(item => item.type === state.review.type
-    || (state.review.type === "manual" && item.manual)
-    || (state.review.type === "internal" && item.type.startsWith("internal-")));
-  if (state.review.search) items = items.filter(item => reconciliationSearchText(item).includes(state.review.search));
+  let items = getFilteredReconciliations(state.review.tab);
   items = sortReconciliations(items, state.review.sort);
   const pageCount = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
   state.review.page = Math.min(state.review.page, pageCount);
@@ -2689,13 +2967,24 @@ function renderReviewContent() {
   refreshIcons(dom.reviewContent);
 }
 
+function getFilteredReconciliations(status) {
+  let items = state.results.reconciliations.filter(item => item.status === status);
+  if (state.review.type !== "all") items = items.filter(item => item.type === state.review.type
+    || (state.review.type === "manual" && item.manual)
+    || (state.review.type === "internal" && item.type.startsWith("internal-")));
+  if (state.review.search) items = items.filter(item => reconciliationSearchText(item).includes(state.review.search));
+  return items;
+}
+
 function renderReconciliationRow(item, isPossible) {
   const systemDescription = summarizeMovements(item.systemMovements);
   const bankDescription = summarizeMovements(item.bankMovements);
+  const observationControl = `<label class="observation-control"><span>Observación · se exporta</span><input class="observation-input" data-observation="${item.id}" value="${escapeAttribute(item.observation)}" placeholder="Agregar una nota" title="Esta observación se incluye en el Excel final"></label>`;
   const actions = isPossible
-    ? `<div class="tabular-actions"><input class="observation-input" data-observation="${item.id}" value="${escapeAttribute(item.observation)}" placeholder="Agregar observación"><button class="table-action approve" data-action="approve" data-id="${item.id}"><i data-lucide="check"></i>Aprobar</button><button class="table-action" data-action="edit" data-id="${item.id}"><i data-lucide="list-restart"></i>Editar</button><button class="table-action reject" data-action="reject" data-id="${item.id}"><i data-lucide="x"></i>Rechazar</button><button class="table-action" data-action="detail" data-id="${item.id}"><i data-lucide="info"></i>Motivo</button></div>`
-    : `<div class="tabular-actions"><button class="table-action" data-action="detail" data-id="${item.id}"><i data-lucide="eye"></i>Ver detalle</button><button class="table-action reject" data-action="unmatch" data-id="${item.id}"><i data-lucide="unlink"></i>Quitar conciliación</button></div>`;
-  return `<tr class="result-row ${item.status}"><td data-label="ID / Estado"><strong>${item.id}</strong><br>${statusBadge(item.status)}</td><td data-label="Tipo"><span class="type-badge">${typeLabel(item)}</span>${item.relaxedPass ? `<span class="retry-badge">Reanálisis</span>` : ""}</td><td data-label="Sistema contable" class="descriptions"><strong title="${escapeAttribute(systemDescription.title)}">${escapeHtml(systemDescription.title)}</strong><span>${escapeHtml(systemDescription.subtitle)}</span></td><td data-label="Caja o banco" class="descriptions"><strong title="${escapeAttribute(bankDescription.title)}">${escapeHtml(bankDescription.title)}</strong><span>${escapeHtml(bankDescription.subtitle)}</span></td><td data-label="Total sistema" class="amount">${formatMoney(item.totalSystem)}</td><td data-label="Total caja/banco" class="amount">${formatMoney(item.totalBank)}</td><td data-label="Diferencia" class="amount ${item.difference ? "negative" : ""}">${formatMoney(item.difference)}</td><td data-label="Confianza"><span class="score-badge ${scoreClass(item.score)}">${item.score}</span></td><td data-label="Acciones">${actions}</td></tr>`;
+    ? `<div class="tabular-actions">${observationControl}<button class="table-action approve" type="button" data-action="approve" data-id="${item.id}"><i data-lucide="check"></i>Aprobar</button><button class="table-action" type="button" data-action="edit" data-id="${item.id}" title="Cambiar las filas que integran esta propuesta"><i data-lucide="list-restart"></i>Cambiar movimientos</button><button class="table-action reject" type="button" data-action="reject" data-id="${item.id}"><i data-lucide="x"></i>Rechazar</button><button class="table-action" type="button" data-action="detail" data-id="${item.id}"><i data-lucide="info"></i>Motivo</button></div>`
+    : `<div class="tabular-actions">${observationControl}<button class="table-action" type="button" data-action="detail" data-id="${item.id}"><i data-lucide="eye"></i>Ver detalle</button><button class="table-action reject" type="button" data-action="unmatch" data-id="${item.id}"><i data-lucide="unlink"></i>Quitar conciliación</button></div>`;
+  const retryLabel = item.dateAgnosticPass ? "Sin fecha" : item.automaticRelaxedPass ? "Flexible auto" : item.advancedRetry ? "Búsqueda avanzada" : item.relaxedPass ? "Reanálisis" : "";
+  return `<tr class="result-row ${item.status}"><td data-label="ID / Estado"><strong>${item.id}</strong><br>${statusBadge(item.status)}</td><td data-label="Tipo"><span class="type-badge">${typeLabel(item)}</span>${retryLabel ? `<span class="retry-badge">${retryLabel}</span>` : ""}</td><td data-label="Sistema contable" class="descriptions"><strong title="${escapeAttribute(systemDescription.title)}">${escapeHtml(systemDescription.title)}</strong><span>${escapeHtml(systemDescription.subtitle)}</span></td><td data-label="Caja o banco" class="descriptions"><strong title="${escapeAttribute(bankDescription.title)}">${escapeHtml(bankDescription.title)}</strong><span>${escapeHtml(bankDescription.subtitle)}</span></td><td data-label="Total sistema" class="amount">${formatMoney(item.totalSystem)}</td><td data-label="Total caja/banco" class="amount">${formatMoney(item.totalBank)}</td><td data-label="Diferencia" class="amount ${item.difference ? "negative" : ""}">${formatMoney(item.difference)}</td><td data-label="Confianza"><span class="score-badge ${scoreClass(item.score)}">${item.score}</span></td><td data-label="Acciones">${actions}</td></tr>`;
 }
 
 function bindResultTableEvents() {
@@ -2703,7 +2992,7 @@ function bindResultTableEvents() {
     button.addEventListener("click", () => handleReconciliationAction(button.dataset.action, button.dataset.id));
   });
   dom.reviewContent.querySelectorAll("[data-observation]").forEach(input => {
-    input.addEventListener("change", () => {
+    input.addEventListener("input", () => {
       const item = findReconciliation(input.dataset.observation);
       if (item) item.observation = input.value.trim();
     });
@@ -2721,11 +3010,13 @@ function handleReconciliationAction(action, id) {
     showToast("Conciliación aprobada", `${id} pasó a conciliados.`, "success");
   }
   if (action === "unmatch") {
+    rememberRejectedProposal(item, "Conciliación confirmada quitada por el usuario");
     item.status = "rejected";
     item.observation = item.observation || "Conciliación quitada manualmente";
     showToast("Conciliación quitada", "Sus movimientos volvieron a la lista de pendientes.", "error");
   }
   if (action === "reject") {
+    rememberRejectedProposal(item, "Propuesta rechazada por el usuario");
     item.status = "rejected";
     item.observation = document.querySelector(`[data-observation="${id}"]`)?.value.trim() || item.observation;
     showToast("Propuesta rechazada", "Sus movimientos volvieron a la lista de pendientes.", "error");
@@ -2838,6 +3129,7 @@ function createManualReconciliation() {
     reconciliation.reasons.push("La selección fue confirmada manualmente");
     reconciliation.observation = "Conciliación manual";
   }
+  state.review.rejectedSignatures.delete(reconciliationSignature(reconciliation));
   addReconciliation(reconciliation);
   state.review.selectedSystem.clear();
   state.review.selectedBank.clear();
@@ -2849,7 +3141,10 @@ function openReconciliationDetail(item) {
   document.getElementById("detailTitle").textContent = `Detalle ${item.id}`;
   document.getElementById("detailSubtitle").textContent = `${typeLabel(item)} · ${item.criterion}`;
   const content = document.getElementById("detailContent");
-  content.innerHTML = `<div class="detail-grid">${renderDetailSide("Sistema contable", item.systemMovements)}${renderDetailSide("Caja o banco", item.bankMovements)}<div class="detail-summary"><div><span>Total sistema</span><strong>${formatMoney(item.totalSystem)}</strong></div><div><span>Total caja/banco</span><strong>${formatMoney(item.totalBank)}</strong></div><div><span>Diferencia</span><strong>${formatMoney(item.difference)}</strong></div><div><span>Confianza</span><strong>${item.score}/100</strong></div><div><span>Estado</span><strong>${item.status === "confirmed" ? "Conciliado" : "Posible"}</strong></div></div><div class="reason-list"><h3>Por qué se propuso</h3><ul>${item.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join("")}${item.ambiguous ? "<li>La combinación es ambigua y requiere aprobación manual.</li>" : ""}</ul></div></div>`;
+  content.innerHTML = `<div class="detail-grid">${renderDetailSide("Sistema contable", item.systemMovements)}${renderDetailSide("Caja o banco", item.bankMovements)}<div class="detail-summary"><div><span>Total sistema</span><strong>${formatMoney(item.totalSystem)}</strong></div><div><span>Total caja/banco</span><strong>${formatMoney(item.totalBank)}</strong></div><div><span>Diferencia</span><strong>${formatMoney(item.difference)}</strong></div><div><span>Confianza</span><strong>${item.score}/100</strong></div><div><span>Estado</span><strong>${item.status === "confirmed" ? "Conciliado" : "Posible"}</strong></div></div><div class="reason-list"><h3>Por qué se propuso</h3><ul>${item.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join("")}${item.ambiguous ? "<li>La combinación es ambigua y requiere aprobación manual.</li>" : ""}</ul></div><label class="field detail-observation"><span>Observación <small>se incluye en el Excel exportado</small></span><textarea data-detail-observation placeholder="Agregar una nota para esta conciliación">${escapeHtml(item.observation)}</textarea></label></div>`;
+  content.querySelector("[data-detail-observation]")?.addEventListener("input", event => {
+    item.observation = event.target.value.trim();
+  });
   refreshIcons(content);
   dom.detailDialog.showModal();
 }
@@ -2872,6 +3167,7 @@ function openEditGroup(item) {
   state.review.editSearchSystem = "";
   state.review.editSearchBank = "";
   renderEditGroupContent();
+  document.getElementById("editGroupObservation").value = item.observation || "";
   dom.editGroupDialog.showModal();
 }
 
@@ -2967,10 +3263,14 @@ function saveEditedGroup() {
   const updated = systemMovements.length && bankMovements.length
     ? calculateReconciliation(systemMovements, bankMovements)
     : calculateInternalReconciliation(systemMovements.length ? systemMovements : bankMovements, systemMovements.length ? "system" : "bank");
+  const originalSignature = reconciliationSignature(current);
+  const updatedSignature = reconciliationSignature(updated);
+  if (originalSignature !== updatedSignature) rememberRejectedProposal(current, "Agrupación reemplazada al cambiar sus movimientos");
+  state.review.rejectedSignatures.delete(updatedSignature);
   Object.assign(current, updated, {
     id: current.id,
     status: "possible",
-    observation: current.observation,
+    observation: document.getElementById("editGroupObservation").value.trim() || current.observation,
     ambiguous: false,
     alternativeCount: 0,
     criterion: "Agrupación editada manualmente; requiere aprobación",
@@ -3138,16 +3438,17 @@ function exportWorkbook() {
       ["Convención de caja o banco", splitConventionLabel(state.sources.bank.splitConvention)],
       ["Nivel automático", state.config.autoThreshold],
       ["Nivel posible", state.config.possibleThreshold],
-      ["Motor de procesamiento", state.results.engineMode === "worker" ? "Web Worker indexado" : "Motor indexado compatible"],
+      ["Motor de procesamiento", String(state.results.engineMode).includes("worker") ? "Web Worker indexado" : "Motor indexado compatible"],
       ["Parejas candidatas inspeccionadas", state.results.candidatePairs],
       ["Parejas puntuadas", state.results.evaluatedPairs],
       ["Combinaciones agrupadas evaluadas", state.results.evaluatedCombinations],
       ["Movimientos base acotados", state.results.limitedGroupAnchors],
       ["Límite de parejas alcanzado", yesNo(state.results.pairLimitReached)],
       ["Límite de agrupaciones alcanzado", yesNo(state.results.combinationLimitReached)],
-      ["Reanálisis flexibles de pendientes", retryPasses.length],
+      ["Pasadas flexibles sobre pendientes", retryPasses.length],
+      ["Agrupaciones rechazadas recordadas", state.review.rejectedSignatures.size],
       ["Último reanálisis flexible", lastRetry ? formatDateTime(lastRetry.at) : "No realizado"],
-      ["Parámetros del último reanálisis", lastRetry ? `${lastRetry.dateTolerance} días · tolerancia ${formatMoney(lastRetry.amountAbsTolerance)} · ${lastRetry.found} coincidencias` : ""]
+      ["Parámetros del último reanálisis", lastRetry ? `${lastRetry.dateTolerance} días · tolerancia ${formatMoney(lastRetry.amountAbsTolerance)} + ${formatDecimal(lastRetry.amountPercentTolerance || 0, 2)}% · descripción ${formatDecimal(lastRetry.minimumDescriptionSimilarity || 0, 0)}% · sin fecha ${yesNo(lastRetry.ignoreDates)} · ${lastRetry.found} coincidencias` : ""]
     ];
     const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
     styleSummarySheet(summarySheet);
@@ -3440,6 +3741,7 @@ function yieldToMain() {
 }
 
 window.ReconciliationApp = Object.freeze({
+  APP_BUILD,
   DEFAULT_CONFIG,
   parseAmount,
   parseDateValue,
