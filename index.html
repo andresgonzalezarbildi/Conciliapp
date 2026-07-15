@@ -6,10 +6,10 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta name="description" content="Herramienta local para conciliación de movimientos contables, de caja y banco.">
   <title>Conciliación contable</title>
-  <link rel="stylesheet" href="styles.css?v=20260715-1">
+  <link rel="stylesheet" href="styles.css?v=20260715-3">
   <script defer src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script defer src="app.js?v=20260715-1"></script>
+  <script defer src="app.js?v=20260715-3"></script>
 </head>
 <body>
   <header class="app-header">
@@ -268,7 +268,7 @@
           <label class="check-field full"><input name="searchGroups" type="checkbox"><span>Buscar también agrupaciones dentro de la tolerancia de fechas</span></label>
           <label class="check-field full"><input name="ignoreDates" type="checkbox"><span>Agregar una pasada uno a uno sin limitar por fecha</span></label>
         </div>
-        <p class="config-help">La búsqueda sin fecha exige que el monto esté dentro de la tolerancia y que la descripción sea suficientemente similar o comparta una referencia numérica. Nunca se confirma automáticamente.</p>
+        <p class="config-help">En uno a uno con fechas compatibles, una descripción por debajo del mínimo ya no bloquea la pareja si monto, fecha y puntaje total alcanzan el nivel indicado: se muestra como Posible. La pasada sin fecha sí exige similitud suficiente o una referencia numérica compartida. Nunca se confirma automáticamente.</p>
         <div class="inline-warning retry-warning"><i data-lucide="info"></i><span>Las propuestas que ya rechazó se recuerdan durante esta conciliación y no volverán a mostrarse con la misma agrupación.</span></div>
       </div>
       <div class="modal-actions"><button class="button button-secondary" data-close-retry type="button">Cancelar</button><button class="button button-primary" type="submit"><i data-lucide="scan-search"></i> Buscar en pendientes</button></div>
