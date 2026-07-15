@@ -83,6 +83,7 @@ function createEmptySource(key, label) {
     workbook: null,
     sheetNames: [],
     selectedSheet: "",
+    importRangeInfo: null,
     matrix: [],
     headerRowIndex: 0,
     headerRowNumber: 1,
@@ -403,6 +404,7 @@ async function loadSourceFile(sourceKey, file) {
       workbook,
       sheetNames: [...workbook.SheetNames],
       selectedSheet: selectInitialSheet(workbook),
+      importRangeInfo: null,
       headerRowNumber: 1,
       dataStartRow: 2,
       dataEndRow: "",
@@ -430,8 +432,16 @@ async function loadSourceFile(sourceKey, file) {
 
 function extractSelectedSheet(source) {
   const sheet = source.workbook.Sheets[source.selectedSheet];
-  const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: "", blankrows: true });
+  const importRangeInfo = findEffectiveWorksheetRange(sheet);
+  const matrix = XLSX.utils.sheet_to_json(sheet, {
+    header: 1,
+    raw: true,
+    defval: "",
+    blankrows: true,
+    range: importRangeInfo.range
+  });
   const headerRowIndex = detectHeaderRow(matrix);
+  source.importRangeInfo = importRangeInfo;
   if (headerRowIndex < 0) {
     source.matrix = [];
     source.headers = [];
@@ -461,14 +471,68 @@ function extractSelectedSheet(source) {
   applySelectedTableRange(source);
 }
 
+function findEffectiveWorksheetRange(sheet) {
+  const declaredReference = sheet?.["!ref"] || "A1:A1";
+  let declaredRange;
+  try {
+    declaredRange = XLSX.utils.decode_range(declaredReference);
+  } catch {
+    declaredRange = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
+  }
+  let lastSubstantiveRow = 0;
+  let lastSubstantiveColumn = 0;
+  let substantiveCells = 0;
+
+  // Algunos Excel guardan ceros o formato hasta la fila 1.048.576. Recorrer
+  // las celdas dispersas evita materializar ese rango como un millón de filas.
+  for (const address in sheet) {
+    if (address[0] === "!") continue;
+    const cell = sheet[address];
+    if (!isSubstantiveWorksheetCell(cell)) continue;
+    let position;
+    try {
+      position = XLSX.utils.decode_cell(address);
+    } catch {
+      continue;
+    }
+    lastSubstantiveRow = Math.max(lastSubstantiveRow, position.r);
+    lastSubstantiveColumn = Math.max(lastSubstantiveColumn, position.c);
+    substantiveCells++;
+  }
+
+  const range = {
+    s: { r: 0, c: 0 },
+    e: { r: lastSubstantiveRow, c: lastSubstantiveColumn }
+  };
+  return {
+    range,
+    declaredReference,
+    effectiveReference: XLSX.utils.encode_range(range),
+    declaredRows: declaredRange.e.r - declaredRange.s.r + 1,
+    effectiveRows: lastSubstantiveRow + 1,
+    ignoredTrailingRows: Math.max(0, declaredRange.e.r - lastSubstantiveRow),
+    substantiveCells
+  };
+}
+
+function isSubstantiveWorksheetCell(cell) {
+  if (!cell || cell.v === null || cell.v === undefined || cell.v === "") return false;
+  if (typeof cell.v === "number") return Number.isFinite(cell.v) ? Math.abs(cell.v) > 1e-12 : true;
+  return true;
+}
+
 function applySelectedTableRange(source) {
   if (!source.matrix.length) return;
   const headerRowIndex = clamp(source.headerRowNumber - 1, 0, source.matrix.length - 1);
   const rawHeaders = source.matrix[headerRowIndex] || [];
   const endRowIndex = source.dataEndRow ? Math.min(Number(source.dataEndRow), source.matrix.length) : source.matrix.length;
   const dataStartIndex = clamp(source.dataStartRow - 1, 0, source.matrix.length);
-  const relevantRows = source.matrix.slice(Math.min(headerRowIndex, dataStartIndex), endRowIndex);
-  const width = Math.max(rawHeaders.length, 0, ...relevantRows.map(row => row.length));
+  const relevantStartIndex = Math.min(headerRowIndex, dataStartIndex);
+  let width = rawHeaders.length;
+  for (let index = relevantStartIndex; index < endRowIndex; index++) {
+    const row = source.matrix[index];
+    if (Array.isArray(row) && row.length > width) width = row.length;
+  }
   const headers = Array.from({ length: width }, (_, index) => {
     const value = String(rawHeaders[index] ?? "").trim();
     return value || `Columna ${columnLetter(index + 1)}`;
@@ -528,7 +592,7 @@ function maybeAutoDetectSplitConvention(source) {
     });
   });
   const values = [...amounts.debit, ...amounts.credit];
-  if (!amounts.debit.length || !amounts.credit.length || !values.every(value => value >= 0)) {
+  if (!values.length || !values.every(value => value >= 0)) {
     source.splitConvention = "preserve";
     return;
   }
@@ -663,7 +727,10 @@ function renderImportDetectionNote(source, container) {
   const format = effective === "signed" ? "Monto con signo" : "Débito y Crédito";
   const splitConvention = effective === "split" ? ` · Convención${source.splitConventionLocked ? "" : " detectada"} <strong>${escapeHtml(splitConventionLabel(source.splitConvention))}</strong>` : "";
   const period = source.dateFrom && source.dateTo ? ` · Período <strong>${formatDateInput(source.dateFrom)}–${formatDateInput(source.dateTo)}</strong>${source.periodSource === "sistema" ? " sugerido desde el sistema" : source.periodSource === "archivo" ? " detectado en el archivo" : ""}` : "";
-  container.innerHTML = `${source.formatMode === "auto" ? "Formato detectado" : "Formato seleccionado"}: <strong>${format}</strong>${splitConvention} · Encabezados en fila <strong>${source.headerRowNumber}</strong>${period}`;
+  const ignoredRows = source.importRangeInfo?.ignoredTrailingRows > 0
+    ? ` · Se ignoraron <strong>${source.importRangeInfo.ignoredTrailingRows.toLocaleString("es-UY")}</strong> filas finales con ceros o formato residual`
+    : "";
+  container.innerHTML = `${source.formatMode === "auto" ? "Formato detectado" : "Formato seleccionado"}: <strong>${format}</strong>${splitConvention} · Encabezados en fila <strong>${source.headerRowNumber}</strong>${period}${ignoredRows}`;
 }
 
 function splitConventionLabel(value) {
@@ -767,7 +834,14 @@ function normalizeSourceRow(source, row, effectiveFormat) {
   const mappedAmounts = effectiveFormat === "signed"
     ? [valueAt(row, source.mapping.amount)]
     : [valueAt(row, source.mapping.debit), valueAt(row, source.mapping.credit)];
-  if ([rawDate, rawDescription, ...mappedAmounts].every(isBlank)) return { errors: [], skip: true, skipReason: "empty-mapped-fields", movement: null };
+  const mappedAmountsAreEmpty = effectiveFormat === "split"
+    ? mappedAmounts.every(value => {
+      if (isBlank(value)) return true;
+      const parsed = parseAmount(value);
+      return parsed !== null && Math.abs(parsed) <= .005;
+    })
+    : mappedAmounts.every(isBlank);
+  if (isBlank(rawDate) && isBlank(rawDescription) && mappedAmountsAreEmpty) return { errors: [], skip: true, skipReason: "empty-mapped-fields", movement: null };
   const excludedDescriptions = new Set(String(source.excludedDescriptions || "").split(",").map(normalizeHeader).filter(Boolean));
   if (excludedDescriptions.has(normalizeHeader(rawDescription))) return { errors: [], skip: true, skipReason: "excluded-description", movement: null };
   const date = parseDateValue(rawDate);
@@ -792,23 +866,26 @@ function normalizeSourceRow(source, row, effectiveFormat) {
   } else {
     const rawDebit = valueAt(row, source.mapping.debit);
     const rawCredit = valueAt(row, source.mapping.credit);
-    const debitEmpty = isBlank(rawDebit);
-    const creditEmpty = isBlank(rawCredit);
-    const debit = debitEmpty ? 0 : parseAmount(rawDebit);
-    const credit = creditEmpty ? 0 : parseAmount(rawCredit);
+    const debitProvided = !isBlank(rawDebit);
+    const creditProvided = !isBlank(rawCredit);
+    const debit = debitProvided ? parseAmount(rawDebit) : 0;
+    const credit = creditProvided ? parseAmount(rawCredit) : 0;
+    const debitActive = debit !== null && Math.abs(debit) > .005;
+    const creditActive = credit !== null && Math.abs(credit) > .005;
     originalAmount = `Débito: ${displayOriginalValue(rawDebit)} · Crédito: ${displayOriginalValue(rawCredit)}`;
-    if (debitEmpty && creditEmpty) errors.push(`La fila ${row.excelRow} no contiene débito ni crédito.`);
-    if (!debitEmpty && debit === null) errors.push(`La fila ${row.excelRow} contiene un débito no reconocido.`);
-    if (!creditEmpty && credit === null) errors.push(`La fila ${row.excelRow} contiene un crédito no reconocido.`);
-    if (!debitEmpty && !creditEmpty && !source.allowBoth) errors.push(`La fila ${row.excelRow} contiene débito y crédito simultáneamente.`);
-    if (debit !== null && credit !== null && !(debitEmpty && creditEmpty)) {
+    if (!debitProvided && !creditProvided) errors.push(`La fila ${row.excelRow} no contiene débito ni crédito.`);
+    if (debitProvided && debit === null) errors.push(`La fila ${row.excelRow} contiene un débito no reconocido.`);
+    if (creditProvided && credit === null) errors.push(`La fila ${row.excelRow} contiene un crédito no reconocido.`);
+    if (debit !== null && credit !== null && !debitActive && !creditActive) errors.push(`La fila ${row.excelRow} no contiene un débito o crédito distinto de cero.`);
+    if (debitActive && creditActive && !source.allowBoth) errors.push(`La fila ${row.excelRow} contiene débito y crédito simultáneamente.`);
+    if (debit !== null && credit !== null && (debitActive || creditActive)) {
       // La dirección contable puede venir dada por el signo de la celda o por
       // la columna donde está el importe. Se conserva el valor original aparte.
       const writtenAmount = (debit || 0) + (credit || 0);
       if (source.splitConvention === "debit-positive") signedAmount = Math.abs(debit || 0) - Math.abs(credit || 0);
       else if (source.splitConvention === "credit-positive") signedAmount = -Math.abs(debit || 0) + Math.abs(credit || 0);
       else signedAmount = source.splitConvention === "invert" ? -writtenAmount : writtenAmount;
-      movementType = !debitEmpty && creditEmpty ? "debit" : debitEmpty && !creditEmpty ? "credit" : "mixed";
+      movementType = debitActive && !creditActive ? "debit" : !debitActive && creditActive ? "credit" : "mixed";
     }
   }
   const status = source.mapping.status === "" ? "" : String(valueAt(row, source.mapping.status) ?? "").trim();
@@ -1614,9 +1691,18 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     const amountScore = amountWithinTolerance
       ? tolerance <= .005 ? (Math.abs(difference) <= .005 ? 45 : 0) : 45 - Math.min(5, 5 * Math.abs(difference) / Math.max(tolerance, .01))
       : 0;
-    const dateDifferences = systemMovements.flatMap(system => bankMovements.map(bank => Math.abs(Math.round((system.dateTime - bank.dateTime) / DAY_MS))));
-    const maximumDateDifference = dateDifferences.length ? Math.max(...dateDifferences) : 0;
-    const averageDateDifference = dateDifferences.length ? dateDifferences.reduce((sum, value) => sum + value, 0) / dateDifferences.length : 0;
+    let maximumDateDifference = 0;
+    let totalDateDifference = 0;
+    let dateComparisonCount = 0;
+    for (const systemMovement of systemMovements) {
+      for (const bankMovement of bankMovements) {
+        const differenceInDays = Math.abs(Math.round((systemMovement.dateTime - bankMovement.dateTime) / DAY_MS));
+        maximumDateDifference = Math.max(maximumDateDifference, differenceInDays);
+        totalDateDifference += differenceInDays;
+        dateComparisonCount++;
+      }
+    }
+    const averageDateDifference = dateComparisonCount ? totalDateDifference / dateComparisonCount : 0;
     const dateWithinTolerance = maximumDateDifference <= config.dateTolerance;
     const dateScore = dateWithinTolerance ? config.dateTolerance === 0 ? 25 : 25 * Math.max(.35, 1 - averageDateDifference / (config.dateTolerance + 1)) : 0;
     const descriptionSimilarity = config.considerDescription ? groupSimilarity(systemMovements, bankMovements) : 1;
@@ -1906,12 +1992,12 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
         || Math.abs(anchor.comparisonAmount - a.comparisonAmount) - Math.abs(anchor.comparisonAmount - b.comparisonAmount));
       if (compatible.length >= 2) {
         const bulkGroups = findBulkGroups(anchor, compatible, type);
-        candidates.push(...bulkGroups);
+        for (const group of bulkGroups) candidates.push(group);
         const hasStrongBulkGroup = bulkGroups.some(candidate => candidate.score >= config.autoThreshold);
         if (!hasStrongBulkGroup) {
           const subsetPoolSize = Math.min(compatible.length, Math.max(24, Math.min(32, config.maxGroupSize)));
           const enumerated = await enumerateGroups(anchor, compatible.slice(0, subsetPoolSize), type);
-          candidates.push(...enumerated.results);
+          for (const group of enumerated.results) candidates.push(group);
           if (enumerated.cancelled) return true;
         }
       }
@@ -1953,11 +2039,17 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
 
   function calculateInternal(movements, sourceKey, criterion) {
     const net = round(movements.reduce((sum, movement) => sum + movement.comparisonAmount, 0));
-    const reference = Math.max(0, ...movements.map(movement => Math.abs(movement.comparisonAmount)));
+    let reference = 0;
+    let minimumDay = Infinity;
+    let maximumDay = -Infinity;
+    for (const movement of movements) {
+      reference = Math.max(reference, Math.abs(movement.comparisonAmount));
+      minimumDay = Math.min(minimumDay, movement.day);
+      maximumDay = Math.max(maximumDay, movement.day);
+    }
     const tolerance = amountTolerance(reference);
     const amountWithinTolerance = Math.abs(net) <= tolerance + .005;
-    const days = movements.map(movement => movement.day);
-    const dateDifference = Math.max(...days) - Math.min(...days);
+    const dateDifference = Number.isFinite(minimumDay) ? maximumDay - minimumDay : 0;
     const dateWithinTolerance = dateDifference <= config.dateTolerance;
     const descriptionSimilarity = config.considerDescription ? internalDescriptionSimilarity(movements) : 1;
     let refsScore = 0;
@@ -2180,7 +2272,7 @@ async function reconcileGroups(type) {
       .slice(0, 24);
     if (compatible.length >= 2) {
       const found = enumerateGroupCandidates(anchor, compatible, type);
-      candidates.push(...found);
+      for (const candidate of found) candidates.push(candidate);
     }
     if (index % 5 === 0 || index === anchors.length - 1) {
       setProcessingProgress(stageStart + stageSpan * ((index + 1) / Math.max(1, anchors.length)), "Buscando agrupaciones de movimientos…", `${state.results.evaluatedCombinations.toLocaleString("es-UY")} combinaciones evaluadas`);
@@ -2271,9 +2363,18 @@ function calculateReconciliation(systemMovements, bankMovements, type = inferTyp
   const amountScore = amountWithinTolerance
     ? tolerance <= .005 ? (Math.abs(difference) <= .005 ? 45 : 0) : 45 - Math.min(5, 5 * Math.abs(difference) / Math.max(tolerance, .01))
     : 0;
-  const dateDifferences = systemMovements.flatMap(system => bankMovements.map(bank => daysBetween(system.date, bank.date)));
-  const dateDifference = dateDifferences.length ? Math.max(...dateDifferences) : 0;
-  const averageDateDifference = dateDifferences.length ? dateDifferences.reduce((sum, value) => sum + value, 0) / dateDifferences.length : 0;
+  let dateDifference = 0;
+  let totalDateDifference = 0;
+  let dateComparisonCount = 0;
+  for (const systemMovement of systemMovements) {
+    for (const bankMovement of bankMovements) {
+      const differenceInDays = daysBetween(systemMovement.date, bankMovement.date);
+      dateDifference = Math.max(dateDifference, differenceInDays);
+      totalDateDifference += differenceInDays;
+      dateComparisonCount++;
+    }
+  }
+  const averageDateDifference = dateComparisonCount ? totalDateDifference / dateComparisonCount : 0;
   const dateWithinTolerance = dateDifference <= state.config.dateTolerance;
   const dateScore = dateWithinTolerance
     ? state.config.dateTolerance === 0 ? 25 : 25 * Math.max(.35, 1 - averageDateDifference / (state.config.dateTolerance + 1))
@@ -2339,7 +2440,8 @@ function internalSelectionCanReconcile(movements) {
   const amounts = movements.map(comparisonAmount).filter(amount => Math.abs(amount) > .005);
   if (!amounts.some(amount => amount > 0) || !amounts.some(amount => amount < 0)) return false;
   const net = roundMoney(amounts.reduce((sum, amount) => sum + amount, 0));
-  const reference = Math.max(0, ...amounts.map(Math.abs));
+  let reference = 0;
+  for (const amount of amounts) reference = Math.max(reference, Math.abs(amount));
   return Math.abs(net) <= amountToleranceFor(reference) + .005;
 }
 
@@ -2352,10 +2454,17 @@ function manualSelectionCanReconcile(systemMovements, bankMovements) {
 
 function calculateInternalReconciliation(movements, sourceKey, manual = false) {
   const net = roundMoney(movements.reduce((sum, movement) => sum + comparisonAmount(movement), 0));
-  const reference = Math.max(0, ...movements.map(movement => Math.abs(comparisonAmount(movement))));
+  let reference = 0;
+  let minimumTimestamp = Infinity;
+  let maximumTimestamp = -Infinity;
+  for (const movement of movements) {
+    reference = Math.max(reference, Math.abs(comparisonAmount(movement)));
+    const timestamp = movement.date.getTime();
+    minimumTimestamp = Math.min(minimumTimestamp, timestamp);
+    maximumTimestamp = Math.max(maximumTimestamp, timestamp);
+  }
   const tolerance = amountToleranceFor(reference);
-  const timestamps = movements.map(movement => movement.date.getTime());
-  const dateDifference = timestamps.length ? Math.round((Math.max(...timestamps) - Math.min(...timestamps)) / DATE_MS) : 0;
+  const dateDifference = Number.isFinite(minimumTimestamp) ? Math.round((maximumTimestamp - minimumTimestamp) / DATE_MS) : 0;
   let similarity = 0;
   if (!state.config.considerDescription) similarity = 1;
   else if (movements.length >= 2) {
@@ -2914,7 +3023,12 @@ function paginationPages(current, count) {
 
 function sortReconciliations(items, sort) {
   const copy = [...items];
-  const firstDate = item => Math.min(...[...item.systemMovements, ...item.bankMovements].map(movement => movement.date.getTime()));
+  const firstDate = item => {
+    let minimum = Infinity;
+    for (const movement of item.systemMovements) minimum = Math.min(minimum, movement.date.getTime());
+    for (const movement of item.bankMovements) minimum = Math.min(minimum, movement.date.getTime());
+    return minimum;
+  };
   if (sort === "score-asc") copy.sort((a, b) => a.score - b.score);
   else if (sort === "date-desc") copy.sort((a, b) => firstDate(b) - firstDate(a));
   else if (sort === "date-asc") copy.sort((a, b) => firstDate(a) - firstDate(b));
