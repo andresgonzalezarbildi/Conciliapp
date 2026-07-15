@@ -4,7 +4,7 @@ const DEFAULT_CONFIG = Object.freeze({
   dateTolerance: 1,
   amountAbsTolerance: 0.10,
   amountPercentTolerance: 0,
-  maxGroupSize: 8,
+  maxGroupSize: 100,
   maxPairComparisons: 2000000,
   maxCombinations: 25000,
   requireSameSign: true,
@@ -12,6 +12,8 @@ const DEFAULT_CONFIG = Object.freeze({
   searchOneToOne: true,
   searchOneToMany: true,
   searchManyToOne: true,
+  allowMixedGroupSigns: true,
+  searchInternalOffsets: true,
   considerDescription: true,
   autoThreshold: 70,
   possibleThreshold: 55,
@@ -19,11 +21,12 @@ const DEFAULT_CONFIG = Object.freeze({
   ignoreAccents: true,
   ignorePunctuation: true,
   ignoredWords: "pago, recibo, transferencia",
-  excludeReconciled: false
+  excludeReconciled: false,
+  relaxedDescriptionPriority: false
 });
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 50;
 const DATE_MS = 86400000;
 const ACCEPTED_EXTENSIONS = ["xlsx", "xls", "csv"];
 const FIELD_LABELS = {
@@ -61,7 +64,13 @@ const state = {
     page: 1,
     selectedSystem: new Set(),
     selectedBank: new Set(),
-    editingId: null
+    editingId: null,
+    editAvailableSystem: [],
+    editAvailableBank: [],
+    editSelectedSystem: new Set(),
+    editSelectedBank: new Set(),
+    editSearchSystem: "",
+    editSearchBank: ""
   }
 };
 
@@ -93,6 +102,7 @@ function createEmptySource(key, label) {
     detectedFormat: "signed",
     positiveMeaning: "debit",
     splitConvention: "preserve",
+    splitConventionLocked: false,
     allowBoth: false,
     mapping: { date: "", description: "", amount: "", debit: "", credit: "", status: "" },
     movements: [],
@@ -112,7 +122,9 @@ function createEmptyResults() {
     evaluatedCombinations: 0,
     pairLimitReached: false,
     combinationLimitReached: false,
+    limitedGroupAnchors: 0,
     engineMode: "",
+    retryPasses: [],
     nextId: 1
   };
 }
@@ -195,6 +207,7 @@ function bindGlobalEvents() {
     button.addEventListener("click", () => {
       state.review.tab = button.dataset.reviewTab;
       state.review.page = 1;
+      syncReviewControls();
       renderReview();
     });
   });
@@ -213,6 +226,8 @@ function bindGlobalEvents() {
     state.review.page = 1;
     renderReviewContent();
   });
+  document.getElementById("approveAllPossibleBtn").addEventListener("click", approveAllPossible);
+  document.getElementById("retryPendingBtn").addEventListener("click", retryPendingReconciliation);
   document.querySelectorAll("[data-close-detail]").forEach(button => button.addEventListener("click", () => dom.detailDialog.close()));
   document.querySelectorAll("[data-close-group]").forEach(button => button.addEventListener("click", () => dom.editGroupDialog.close()));
   document.getElementById("saveGroupBtn").addEventListener("click", saveEditedGroup);
@@ -306,7 +321,12 @@ function bindSourceEditor(sourceKey) {
     if (source.workbook) { autoMapColumns(source); renderSourceEditor(sourceKey); }
   });
   refs.positiveMeaning.addEventListener("change", event => { source.positiveMeaning = event.target.value; validateSource(sourceKey); });
-  refs.splitConvention.addEventListener("change", event => { source.splitConvention = event.target.value; validateSource(sourceKey); });
+  refs.splitConvention.addEventListener("change", event => {
+    source.splitConvention = event.target.value;
+    source.splitConventionLocked = true;
+    validateSource(sourceKey);
+    renderImportDetectionNote(source, refs.detectionNote);
+  });
   refs.allowBoth.addEventListener("change", event => { source.allowBoth = event.target.checked; validateSource(sourceKey); });
   refs.sheetSelect.addEventListener("change", event => {
     source.selectedSheet = event.target.value;
@@ -352,6 +372,8 @@ function toggleFormatOptions(editor, source) {
 
 async function loadSourceFile(sourceKey, file) {
   const source = state.sources[sourceKey];
+  const editorName = document.querySelector(`[data-source-editor="${sourceKey}"] [data-source-name]`)?.value.trim();
+  if (editorName) source.name = editorName;
   const extension = file.name.split(".").pop().toLowerCase();
   if (!ACCEPTED_EXTENSIONS.includes(extension)) {
     showToast("Formato no admitido", "Seleccione un archivo XLSX, XLS o CSV.", "error");
@@ -491,6 +513,32 @@ function autoMapColumns(source) {
     credit: effective === "split" ? detected.credit : "",
     status: detected.status
   };
+  maybeAutoDetectSplitConvention(source);
+}
+
+function maybeAutoDetectSplitConvention(source) {
+  if (source.splitConventionLocked || getEffectiveFormat(source) !== "split" || source.mapping.debit === "" || source.mapping.credit === "") return;
+  const amounts = { debit: [], credit: [] };
+  source.rows.slice(0, 1000).forEach(row => {
+    ["debit", "credit"].forEach(field => {
+      const raw = valueAt(row, source.mapping[field]);
+      if (isBlank(raw)) return;
+      const parsed = parseAmount(raw);
+      if (parsed !== null && Math.abs(parsed) > .005) amounts[field].push(parsed);
+    });
+  });
+  const values = [...amounts.debit, ...amounts.credit];
+  if (!amounts.debit.length || !amounts.credit.length || !values.every(value => value >= 0)) {
+    source.splitConvention = "preserve";
+    return;
+  }
+  const debitHeader = normalizeHeader(source.headers[Number(source.mapping.debit)] || "");
+  const creditHeader = normalizeHeader(source.headers[Number(source.mapping.credit)] || "");
+  const ledgerHeaders = /(^| )debe($| )/.test(debitHeader) || /(^| )haber($| )/.test(creditHeader);
+  // En un extracto de banco o una caja expresada como Ingresos/Pagos, el
+  // Crédito/Ingreso aumenta la caja y el Débito/Pago la disminuye. En un mayor
+  // con Debe/Haber se conserva la convención contable tradicional.
+  source.splitConvention = source.key === "bank" && !ledgerHeaders ? "credit-positive" : "debit-positive";
 }
 
 function detectHeaderRow(matrix) {
@@ -613,8 +661,18 @@ function renderSourceEditor(sourceKey) {
 function renderImportDetectionNote(source, container) {
   const effective = getEffectiveFormat(source);
   const format = effective === "signed" ? "Monto con signo" : "Débito y Crédito";
+  const splitConvention = effective === "split" ? ` · Convención${source.splitConventionLocked ? "" : " detectada"} <strong>${escapeHtml(splitConventionLabel(source.splitConvention))}</strong>` : "";
   const period = source.dateFrom && source.dateTo ? ` · Período <strong>${formatDateInput(source.dateFrom)}–${formatDateInput(source.dateTo)}</strong>${source.periodSource === "sistema" ? " sugerido desde el sistema" : source.periodSource === "archivo" ? " detectado en el archivo" : ""}` : "";
-  container.innerHTML = `${source.formatMode === "auto" ? "Formato detectado" : "Formato seleccionado"}: <strong>${format}</strong> · Encabezados en fila <strong>${source.headerRowNumber}</strong>${period}`;
+  container.innerHTML = `${source.formatMode === "auto" ? "Formato detectado" : "Formato seleccionado"}: <strong>${format}</strong>${splitConvention} · Encabezados en fila <strong>${source.headerRowNumber}</strong>${period}`;
+}
+
+function splitConventionLabel(value) {
+  return {
+    preserve: "Conservar signo escrito",
+    invert: "Invertir signo escrito",
+    "debit-positive": "Débito + / Crédito −",
+    "credit-positive": "Débito − / Crédito +"
+  }[value] || String(value || "");
 }
 
 function renderMappingGrid(source, container) {
@@ -631,6 +689,10 @@ function renderMappingGrid(source, container) {
   container.querySelectorAll("[data-map-field]").forEach(select => {
     select.addEventListener("change", event => {
       source.mapping[event.target.dataset.mapField] = event.target.value;
+      maybeAutoDetectSplitConvention(source);
+      const editor = document.querySelector(`[data-source-editor="${source.key}"]`);
+      editor._refs.splitConvention.value = source.splitConvention;
+      renderImportDetectionNote(source, editor._refs.detectionNote);
       validateSource(source.key);
     });
   });
@@ -740,10 +802,12 @@ function normalizeSourceRow(source, row, effectiveFormat) {
     if (!creditEmpty && credit === null) errors.push(`La fila ${row.excelRow} contiene un crédito no reconocido.`);
     if (!debitEmpty && !creditEmpty && !source.allowBoth) errors.push(`La fila ${row.excelRow} contiene débito y crédito simultáneamente.`);
     if (debit !== null && credit !== null && !(debitEmpty && creditEmpty)) {
-      // En columnas separadas, Débito/Crédito indica el tipo de movimiento; el
-      // signo de la celda sigue indicando si el importe suma o resta.
-      const originalSignedAmount = (debit || 0) + (credit || 0);
-      signedAmount = source.splitConvention === "invert" ? -originalSignedAmount : originalSignedAmount;
+      // La dirección contable puede venir dada por el signo de la celda o por
+      // la columna donde está el importe. Se conserva el valor original aparte.
+      const writtenAmount = (debit || 0) + (credit || 0);
+      if (source.splitConvention === "debit-positive") signedAmount = Math.abs(debit || 0) - Math.abs(credit || 0);
+      else if (source.splitConvention === "credit-positive") signedAmount = -Math.abs(debit || 0) + Math.abs(credit || 0);
+      else signedAmount = source.splitConvention === "invert" ? -writtenAmount : writtenAmount;
       movementType = !debitEmpty && creditEmpty ? "debit" : debitEmpty && !creditEmpty ? "credit" : "mixed";
     }
   }
@@ -946,7 +1010,21 @@ function descriptionSimilarity(a, b) {
   const longerCompact = compactLeft.length <= compactRight.length ? compactRight : compactLeft;
   const compactContainment = shorterCompact.length >= 5 && longerCompact.includes(shorterCompact) ? .82 : 0;
   const baseSimilarity = jaccard * .5 + levenshtein * .35 + containment * .15;
-  return clamp(Math.max(baseSimilarity, fuzzyCoverage * .85, compactContainment), 0, 1);
+  const genericTokens = new Set(["cont", "contable", "gasto", "gastos", "factura", "credito", "debito", "pago", "pagos", "recibo", "transferencia", "movimiento", "ajuste", "caja", "banco", "cuota", "cuotas", "proveedor"]);
+  const sharedBusinessToken = [...leftTokens].some(token => token.length >= 3 && /\p{L}/u.test(token) && !genericTokens.has(token) && rightTokens.has(token));
+  return clamp(Math.max(baseSimilarity, fuzzyCoverage * .85, compactContainment, sharedBusinessToken ? .82 : 0), 0, 1);
+}
+
+function groupedDescriptionSimilarity(systemMovements, bankMovements) {
+  if (systemMovements.length === 1 && bankMovements.length === 1) return descriptionSimilarity(systemMovements[0].description, bankMovements[0].description);
+  const left = systemMovements.map(item => item.description).slice(0, 200);
+  const right = bankMovements.map(item => item.description).slice(0, 200);
+  const coverage = (items, others) => items.reduce((sum, description) => {
+    let best = 0;
+    for (const other of others) best = Math.max(best, descriptionSimilarity(description, other));
+    return sum + best;
+  }, 0) / Math.max(1, items.length);
+  return (coverage(left, right) + coverage(right, left)) / 2;
 }
 
 function levenshteinDistance(a, b) {
@@ -996,7 +1074,7 @@ function populateConfigForm() {
 function readConfigForm() {
   const data = new FormData(dom.configForm);
   const numberFields = ["dateTolerance", "amountAbsTolerance", "amountPercentTolerance", "maxGroupSize", "maxPairComparisons", "maxCombinations", "autoThreshold", "possibleThreshold"];
-  const checkboxFields = ["requireSameSign", "invertBetweenTables", "searchOneToOne", "searchOneToMany", "searchManyToOne", "considerDescription", "ignoreCase", "ignoreAccents", "ignorePunctuation", "excludeReconciled"];
+  const checkboxFields = ["requireSameSign", "invertBetweenTables", "searchOneToOne", "searchOneToMany", "searchManyToOne", "allowMixedGroupSigns", "searchInternalOffsets", "considerDescription", "ignoreCase", "ignoreAccents", "ignorePunctuation", "excludeReconciled"];
   numberFields.forEach(key => { state.config[key] = Number(data.get(key)); });
   checkboxFields.forEach(key => { state.config[key] = data.has(key); });
   state.config.ignoredWords = String(data.get("ignoredWords") || "");
@@ -1010,17 +1088,17 @@ function readConfigForm() {
 function updateCostWarning() {
   const warning = document.getElementById("costWarning");
   const estimate = estimateIndexedPairWorkload(state.sources.system.movements, state.sources.bank.movements, state.config);
-  const complexity = state.config.maxGroupSize * state.config.maxCombinations;
+  const complexity = Math.min(state.config.maxGroupSize, 32) * state.config.maxCombinations;
   const limitRisk = estimate.indexedPairs > state.config.maxPairComparisons;
   const largeTables = estimate.totalMovements > 30000;
-  const risky = limitRisk || largeTables || state.config.maxGroupSize > 8 || state.config.maxCombinations > 100000 || complexity > 800000;
+  const risky = limitRisk || largeTables || state.config.maxGroupSize > 250 || state.config.maxCombinations > 500000 || complexity > 16000000;
   warning.classList.toggle("hidden", !risky);
   if (risky) {
     warning.querySelector("span").textContent = limitRisk
       ? `La estimación de ${estimate.indexedPairs.toLocaleString("es-UY")} parejas supera el límite configurado. La búsqueda se detendrá antes de bloquear el equipo.`
       : largeTables
         ? `Se procesarán ${estimate.totalMovements.toLocaleString("es-UY")} movimientos. El trabajo se ejecutará por ventanas de fecha y, cuando el navegador lo permita, en segundo plano.`
-        : "Estos límites pueden producir una búsqueda más lenta. El motor detendrá cada etapa al alcanzar su máximo configurado.";
+        : "Los intentos configurados se aplican a cada movimiento base y pueden producir una búsqueda más lenta. Si uno llega al tope, el motor continúa con el siguiente.";
   }
   renderWorkloadEstimate(estimate);
 }
@@ -1063,7 +1141,7 @@ function renderWorkloadEstimate(estimate = estimateIndexedPairWorkload(state.sou
     ["Movimientos", estimate.totalMovements.toLocaleString("es-UY"), `${state.sources.system.movements.length.toLocaleString("es-UY")} ↔ ${state.sources.bank.movements.length.toLocaleString("es-UY")}`],
     ["Comparación ingenua", estimate.naivePairs.toLocaleString("es-UY"), "No se ejecutará de esta forma"],
     ["Candidatos por fecha/signo", estimate.indexedPairs.toLocaleString("es-UY"), reduction],
-    ["Ejecución", typeof Worker !== "undefined" ? "Web Worker" : "Modo compatible", `Límite ${state.config.maxPairComparisons.toLocaleString("es-UY")}`]
+    ["Ejecución", typeof Worker !== "undefined" ? "Web Worker" : "Modo compatible", `Tope uno a uno: ${state.config.maxPairComparisons.toLocaleString("es-UY")}`]
   ].map(([label, value, detail]) => `<div class="workload-stat"><span>${label}</span><strong>${value}</strong><small>${detail}</small></div>`).join("");
 }
 
@@ -1081,13 +1159,21 @@ function renderConfigSummary() {
 function resetApplication() {
   state.step = 1;
   state.maxVisitedStep = 1;
-  state.sources.system = createEmptySource("system", "Sistema contable");
-  state.sources.bank = createEmptySource("bank", "Caja o banco");
+  // Los controles del editor conservan referencias a estos objetos. Se limpian
+  // en el lugar para que sus eventos sigan apuntando al estado vigente.
+  Object.assign(state.sources.system, createEmptySource("system", "Sistema contable"));
+  Object.assign(state.sources.bank, createEmptySource("bank", "Caja o banco"));
   state.config = { ...DEFAULT_CONFIG };
   state.results = createEmptyResults();
   terminateProcessingWorker();
   state.processing = { cancelled: false, running: false, worker: null, jobId: null };
-  state.review = { tab: "confirmed", search: "", type: "all", sort: "score-desc", page: 1, selectedSystem: new Set(), selectedBank: new Set(), editingId: null };
+  state.review = {
+    tab: "confirmed", search: "", type: "all", sort: "score-desc", page: 1,
+    selectedSystem: new Set(), selectedBank: new Set(), editingId: null,
+    editAvailableSystem: [], editAvailableBank: [],
+    editSelectedSystem: new Set(), editSelectedBank: new Set(),
+    editSearchSystem: "", editSearchBank: ""
+  };
   document.querySelectorAll("[data-source-editor]").forEach(editor => {
     editor.querySelector("[data-source-name]").value = "";
     editor.querySelector("[data-file-input]").value = "";
@@ -1110,6 +1196,7 @@ function resetApplication() {
   document.getElementById("reviewSearch").value = "";
   document.getElementById("typeFilter").value = "all";
   document.getElementById("sortResults").value = "score-desc";
+  syncReviewControls();
   populateConfigForm();
   goToStep(1);
   showToast("Datos eliminados", "La aplicación quedó lista para una nueva conciliación.", "success");
@@ -1130,7 +1217,7 @@ async function startReconciliation() {
     return;
   }
   const estimate = estimateIndexedPairWorkload(state.sources.system.movements, state.sources.bank.movements, state.config);
-  state.processing = { cancelled: false, running: true, worker: null, jobId: `job-${Date.now()}-${Math.random().toString(16).slice(2)}` };
+  state.processing = { cancelled: false, running: true, worker: null, jobId: `job-${Date.now()}-${Math.random().toString(16).slice(2)}`, preserveResults: false, mode: "full" };
   state.results = createEmptyResults();
   setProcessingProgress(2, "Preparando índices de búsqueda…", `${estimate.indexedPairs.toLocaleString("es-UY")} parejas candidatas estimadas`);
   goToStep(5);
@@ -1156,8 +1243,8 @@ async function startReconciliation() {
     state.review.selectedBank.clear();
     renderReview();
     goToStep(6);
-    if (state.results.pairLimitReached) showToast("Límite de parejas alcanzado", `Se evaluó el máximo de ${state.config.maxPairComparisons.toLocaleString("es-UY")} candidatos. Puede ampliar el límite y reprocesar.`, "error", 8500);
-    if (state.results.combinationLimitReached) showToast("Límite de agrupaciones alcanzado", `Se alcanzó el máximo de ${state.config.maxCombinations.toLocaleString("es-UY")} combinaciones. Puede ampliarlo y reprocesar.`, "error", 8500);
+    if (state.results.pairLimitReached) showToast("Tope uno a uno alcanzado", `Se inspeccionaron ${state.config.maxPairComparisons.toLocaleString("es-UY")} pares candidatos. Puede ampliar el tope y reprocesar.`, "error", 8500);
+    if (state.results.combinationLimitReached) showToast("Búsqueda de sumas acotada", `${state.results.limitedGroupAnchors.toLocaleString("es-UY")} movimiento(s) alcanzaron el tope individual; el motor continuó con todos los siguientes.`, "error", 8500);
   } catch (error) {
     console.error(error);
     state.processing.running = false;
@@ -1175,11 +1262,107 @@ function requestProcessingCancellation() {
 }
 
 function cancelProcessing() {
+  const preserveResults = Boolean(state.processing.preserveResults);
   terminateProcessingWorker();
   state.processing.running = false;
-  state.results = createEmptyResults();
-  showToast("Procesamiento cancelado", "No se conservaron resultados parciales.", "error");
-  goToStep(4);
+  if (preserveResults) {
+    state.review.tab = "pending";
+    renderReview();
+    showToast("Reanálisis cancelado", "Las conciliaciones anteriores se conservaron sin cambios.", "error");
+    goToStep(6);
+  } else {
+    state.results = createEmptyResults();
+    showToast("Procesamiento cancelado", "No se conservaron resultados parciales.", "error");
+    goToStep(4);
+  }
+}
+
+async function retryPendingReconciliation() {
+  if (state.processing.running) return;
+  const systemPending = getPendingMovements("system");
+  const bankPending = getPendingMovements("bank");
+  if (systemPending.length + bankPending.length < 2) {
+    showToast("No hay suficientes pendientes", "No quedan movimientos suficientes para realizar otra búsqueda.", "error");
+    return;
+  }
+  const relaxedConfig = {
+    ...state.config,
+    dateTolerance: Math.max(state.config.dateTolerance, 7),
+    amountAbsTolerance: Math.max(state.config.amountAbsTolerance, 1),
+    possibleThreshold: Math.min(state.config.possibleThreshold, 45),
+    autoThreshold: Math.max(state.config.autoThreshold, 90),
+    relaxedDescriptionPriority: true
+  };
+  const estimate = estimateIndexedPairWorkload(systemPending, bankPending, relaxedConfig);
+  state.processing = {
+    cancelled: false,
+    running: true,
+    worker: null,
+    jobId: `retry-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    preserveResults: true,
+    mode: "retry-pending"
+  };
+  setProcessingProgress(2, "Reanalizando sólo los pendientes…", `${systemPending.length + bankPending.length} movimientos · prioridad a palabras compartidas`);
+  goToStep(5);
+  try {
+    await yieldToMain();
+    if (state.processing.cancelled) return cancelProcessing();
+    const engineResult = await runReconciliationEngine({
+      system: systemPending,
+      bank: bankPending,
+      config: relaxedConfig,
+      estimatedPairs: estimate.indexedPairs
+    });
+    if (state.processing.cancelled || engineResult.cancelled) return cancelProcessing();
+    const hydrated = hydrateEngineResult(engineResult).reconciliations;
+    hydrated.forEach(item => {
+      item.relaxedPass = true;
+      item.criterion = `Reanálisis flexible de pendientes · ${item.criterion}`;
+      item.reasons.push("Segunda pasada limitada exclusivamente a movimientos que seguían pendientes");
+      item.reasons.push(`Se amplió la tolerancia de fecha a ${relaxedConfig.dateTolerance} día(s) y la tolerancia absoluta a ${formatMoney(relaxedConfig.amountAbsTolerance)}`);
+      if (!item.observation) item.observation = "Encontrada al reanalizar pendientes";
+      addReconciliation(item);
+    });
+    state.results.candidatePairs += engineResult.candidatePairs || 0;
+    state.results.evaluatedPairs += engineResult.evaluatedPairs || 0;
+    state.results.evaluatedCombinations += engineResult.evaluatedCombinations || 0;
+    state.results.limitedGroupAnchors += engineResult.limitedGroupAnchors || 0;
+    state.results.pairLimitReached ||= Boolean(engineResult.pairLimitReached);
+    state.results.combinationLimitReached ||= Boolean(engineResult.combinationLimitReached);
+    state.results.processingAt = new Date();
+    state.results.engineMode = `${state.results.engineMode || "indexado"} + reanálisis flexible`;
+    if (!Array.isArray(state.results.retryPasses)) state.results.retryPasses = [];
+    state.results.retryPasses.push({
+      at: new Date(),
+      dateTolerance: relaxedConfig.dateTolerance,
+      amountAbsTolerance: relaxedConfig.amountAbsTolerance,
+      possibleThreshold: relaxedConfig.possibleThreshold,
+      autoThreshold: relaxedConfig.autoThreshold,
+      found: hydrated.length
+    });
+    state.processing.running = false;
+    terminateProcessingWorker();
+    const confirmedCount = hydrated.filter(item => item.status === "confirmed").length;
+    const possibleCount = hydrated.filter(item => item.status === "possible").length;
+    setProcessingProgress(100, "Reanálisis completado", `${confirmedCount} conciliadas · ${possibleCount} posibles nuevas`);
+    await delay(280);
+    state.review.tab = possibleCount ? "possible" : confirmedCount ? "confirmed" : "pending";
+    state.review.page = 1;
+    state.review.selectedSystem.clear();
+    state.review.selectedBank.clear();
+    renderReview();
+    goToStep(6);
+    if (hydrated.length) showToast("Pendientes reanalizados", `Se encontraron ${confirmedCount} conciliación(es) clara(s) y ${possibleCount} posible(s).`, "success", 7000);
+    else showToast("Sin nuevas coincidencias", "La segunda pasada no encontró relaciones suficientemente consistentes.", "error", 7000);
+  } catch (error) {
+    console.error(error);
+    state.processing.running = false;
+    terminateProcessingWorker();
+    state.review.tab = "pending";
+    renderReview();
+    goToStep(6);
+    showToast("No se pudo reanalizar", error.message || "Las conciliaciones anteriores se conservaron.", "error", 9000);
+  }
 }
 
 function terminateProcessingWorker() {
@@ -1303,7 +1486,8 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     evaluatedPairs: 0,
     evaluatedCombinations: 0,
     pairLimitReached: false,
-    combinationLimitReached: false
+    combinationLimitReached: false,
+    limitedGroupAnchors: 0
   };
   let nextId = 1;
   const reconciliations = [];
@@ -1313,6 +1497,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
   const comparisonAmount = movement => movement.source === "bank" && config.invertBetweenTables ? -movement.amount : movement.amount;
   const amountTolerance = reference => Math.max(config.amountAbsTolerance, Math.abs(reference) * config.amountPercentTolerance / 100);
   const signKey = movement => config.requireSameSign ? Math.sign(movement.comparisonAmount) : 0;
+  const dayKey = movement => String(movement.day);
   const dateKey = movement => `${movement.day}|${signKey(movement)}`;
   const amountKey = movement => `${movement.day}|${signKey(movement)}|${Math.round(movement.comparisonAmount * 100)}`;
   const formatAmount = value => new Intl.NumberFormat("es-UY", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value) || 0);
@@ -1377,7 +1562,22 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     const shorterCompact = compactLeft.length <= compactRight.length ? compactLeft : compactRight;
     const longerCompact = compactLeft.length <= compactRight.length ? compactRight : compactLeft;
     const compactContainment = shorterCompact.length >= 5 && longerCompact.includes(shorterCompact) ? .82 : 0;
-    return clampValue(Math.max(jaccard * .5 + editSimilarity * .35 + containment * .15, fuzzyCoverage * .85, compactContainment), 0, 1);
+    const genericTokens = new Set(["cont", "contable", "gasto", "gastos", "factura", "credito", "debito", "pago", "pagos", "recibo", "transferencia", "movimiento", "ajuste", "caja", "banco", "cuota", "cuotas", "proveedor"]);
+    const sharedBusinessToken = [...leftTokens].some(token => token.length >= 3 && /\p{L}/u.test(token) && !genericTokens.has(token) && rightTokens.has(token));
+    const businessTokenBoost = sharedBusinessToken ? (config.relaxedDescriptionPriority ? .96 : .82) : 0;
+    return clampValue(Math.max(jaccard * .5 + editSimilarity * .35 + containment * .15, fuzzyCoverage * .85, compactContainment, businessTokenBoost), 0, 1);
+  }
+
+  function groupSimilarity(systemMovements, bankMovements) {
+    if (systemMovements.length === 1 && bankMovements.length === 1) return similarity(systemMovements[0].description, bankMovements[0].description);
+    const left = systemMovements.map(item => item.description).slice(0, 200);
+    const right = bankMovements.map(item => item.description).slice(0, 200);
+    const coverage = (items, others) => items.reduce((sum, description) => {
+      let best = 0;
+      for (const other of others) best = Math.max(best, similarity(description, other));
+      return sum + best;
+    }, 0) / Math.max(1, items.length);
+    return (coverage(left, right) + coverage(right, left)) / 2;
   }
 
   function references(description) {
@@ -1419,17 +1619,21 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     const averageDateDifference = dateDifferences.length ? dateDifferences.reduce((sum, value) => sum + value, 0) / dateDifferences.length : 0;
     const dateWithinTolerance = maximumDateDifference <= config.dateTolerance;
     const dateScore = dateWithinTolerance ? config.dateTolerance === 0 ? 25 : 25 * Math.max(.35, 1 - averageDateDifference / (config.dateTolerance + 1)) : 0;
-    const systemDescription = systemMovements.map(item => item.description).join(" ");
-    const bankDescription = bankMovements.map(item => item.description).join(" ");
-    const descriptionSimilarity = config.considerDescription ? similarity(systemDescription, bankDescription) : 1;
+    const descriptionSimilarity = config.considerDescription ? groupSimilarity(systemMovements, bankMovements) : 1;
     const refsScore = referencePoints(systemMovements.map(item => item.description), bankMovements.map(item => item.description));
     const totalMembers = systemMovements.length + bankMovements.length;
+    const protectedGroupDescription = type !== "one-to-one" && config.considerDescription && descriptionSimilarity >= .82;
+    const descriptionScore = 20 * (protectedGroupDescription ? 1 : descriptionSimilarity);
     let penalty = 0;
-    if (type !== "one-to-one") penalty += Math.max(0, totalMembers - 3) * 2;
-    if (systemMovements.some(item => genericDescription(item.description)) || bankMovements.some(item => genericDescription(item.description))) penalty += 3;
+    if (type !== "one-to-one" && !protectedGroupDescription) penalty += Math.min(12, Math.log2(Math.max(1, totalMembers - 2)) * 2);
+    if (!protectedGroupDescription && (systemMovements.some(item => genericDescription(item.description)) || bankMovements.some(item => genericDescription(item.description)))) penalty += 3;
     if (maximumDateDifference > 0) penalty += Math.min(5, maximumDateDifference);
-    const score = Math.round(clampValue(amountScore + dateScore + 20 * descriptionSimilarity + refsScore - penalty, 0, 100));
-    const exact = Math.abs(difference) <= .005 && dateWithinTolerance && (!config.considerDescription || descriptionSimilarity >= .9);
+    let score = Math.round(clampValue(amountScore + dateScore + descriptionScore + refsScore - penalty, 0, 100));
+    const exactAmountAndDate = Math.abs(difference) <= .005 && maximumDateDifference === 0;
+    const exactAmountCompatibleDate = Math.abs(difference) <= .005 && dateWithinTolerance;
+    if (exactAmountAndDate) score = Math.max(score, type === "one-to-one" ? 90 : 85);
+    else if (exactAmountCompatibleDate) score = Math.max(score, type === "one-to-one" ? 85 : 80);
+    const exact = Math.abs(difference) <= .005 && dateWithinTolerance && (!config.considerDescription || descriptionSimilarity >= .9 || protectedGroupDescription);
     const reasons = [
       Math.abs(difference) <= .005 ? "Los importes coinciden exactamente" : `La diferencia de importe (${formatAmount(Math.abs(difference))}) está dentro de la tolerancia`,
       maximumDateDifference === 0 ? "Las fechas coinciden" : `Las fechas difieren hasta ${maximumDateDifference} día(s)`,
@@ -1437,6 +1641,8 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     ];
     if (refsScore) reasons.push("Se encontraron referencias numéricas coincidentes");
     if (type !== "one-to-one") reasons.push(`La suma de ${type === "one-to-many" ? bankMovements.length : systemMovements.length} movimientos coincide con el otro lado`);
+    if (protectedGroupDescription) reasons.push("La descripción comercial coincide; no se aplicó penalización por cantidad de movimientos");
+    if (exactAmountAndDate && descriptionSimilarity < .82) reasons.push("Monto y fecha exactos tuvieron prioridad sobre la diferencia de descripción");
     return {
       id: null,
       type,
@@ -1451,6 +1657,8 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
       dateWithinTolerance,
       dateDifference: maximumDateDifference,
       descriptionSimilarity,
+      protectedGroupDescription,
+      exactAmountAndDate,
       score,
       exact,
       ambiguous: false,
@@ -1602,14 +1810,17 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
 
   async function enumerateGroups(anchor, compatible, type) {
     const results = [];
-    const target = Math.abs(anchor.comparisonAmount);
-    const tolerance = amountTolerance(target);
-    const maximumSelected = Math.min(Math.max(2, config.maxGroupSize - 1), compatible.length);
-    const members = compatible.map(item => ({ item, absoluteAmount: Math.abs(item.comparisonAmount) }));
+    const mixedSigns = Boolean(config.allowMixedGroupSigns);
+    const target = mixedSigns ? anchor.comparisonAmount : Math.abs(anchor.comparisonAmount);
+    const tolerance = amountTolerance(Math.abs(target));
+    const maximumSelected = Math.min(Math.max(2, config.maxGroupSize), compatible.length);
+    const members = compatible.map(item => ({ item, searchAmount: mixedSigns ? item.comparisonAmount : Math.abs(item.comparisonAmount) }));
     const stack = [{ start: 0, selected: [], sum: 0 }];
-    while (stack.length && metrics.evaluatedCombinations < config.maxCombinations) {
+    let anchorAttempts = 0;
+    while (stack.length && anchorAttempts < config.maxCombinations) {
       const current = stack.pop();
       if (current.selected.length >= 2) {
+        anchorAttempts++;
         metrics.evaluatedCombinations++;
         if (Math.abs(target - current.sum) <= tolerance + .005) {
           const selectedMovements = current.selected.map(entry => entry.item);
@@ -1618,46 +1829,94 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
           const calculated = calculate(systemMovements, bankMovements, type);
           if (calculated.amountWithinTolerance && calculated.dateWithinTolerance && calculated.score >= config.possibleThreshold) results.push(calculated);
         }
-        if (metrics.evaluatedCombinations % 1024 === 0) {
-          if (await checkpoint(type === "one-to-many" ? 70 : 88, "Buscando agrupaciones por ventanas de fecha…", `${metrics.evaluatedCombinations.toLocaleString("es-UY")} combinaciones`, true)) return { results, cancelled: true };
+        if (anchorAttempts % 1024 === 0) {
+          if (await checkpoint(type === "one-to-many" ? 70 : 88, "Buscando agrupaciones por ventanas de fecha…", `${metrics.evaluatedCombinations.toLocaleString("es-UY")} intentos totales`, true)) return { results, cancelled: true, limitReached: false };
         }
       }
-      if (current.selected.length >= maximumSelected || current.start >= members.length || current.sum > target + tolerance + .005) continue;
+      if (current.selected.length >= maximumSelected || current.start >= members.length || (!mixedSigns && current.sum > target + tolerance + .005)) continue;
       for (let index = members.length - 1; index >= current.start; index--) {
         const next = members[index];
-        const nextSum = current.sum + next.absoluteAmount;
-        if (nextSum <= target + tolerance + .005) stack.push({ start: index + 1, selected: [...current.selected, next], sum: nextSum });
+        const nextSum = current.sum + next.searchAmount;
+        if (mixedSigns || nextSum <= target + tolerance + .005) stack.push({ start: index + 1, selected: [...current.selected, next], sum: nextSum });
       }
     }
-    if (metrics.evaluatedCombinations >= config.maxCombinations) metrics.combinationLimitReached = true;
-    return { results, cancelled: false };
+    const limitReached = stack.length > 0 && anchorAttempts >= config.maxCombinations;
+    if (limitReached) {
+      metrics.combinationLimitReached = true;
+      metrics.limitedGroupAnchors++;
+    }
+    return { results, cancelled: false, limitReached };
+  }
+
+  function findBulkGroups(anchor, compatible, type) {
+    const results = [];
+    const mixedSigns = Boolean(config.allowMixedGroupSigns);
+    const target = mixedSigns ? anchor.comparisonAmount : Math.abs(anchor.comparisonAmount);
+    const tolerance = amountTolerance(Math.abs(target));
+    const maximumMembers = Math.max(2, Math.trunc(config.maxGroupSize || 2));
+    const related = compatible.filter(member => similarity(anchor.description, member.description) >= .7 || referencePoints([anchor.description], [member.description]) > 0);
+    const variants = [
+      { label: "mismo día y descripción relacionada", members: related.filter(member => member.day === anchor.day) },
+      { label: "ventana de fecha y descripción relacionada", members: related },
+      { label: "todos los movimientos del mismo día", members: compatible.filter(member => member.day === anchor.day) },
+      { label: "todos los movimientos de la ventana de fecha", members: compatible }
+    ];
+    const seen = new Set();
+    for (const variant of variants) {
+      const members = variant.members;
+      if (members.length < 2 || members.length > maximumMembers) continue;
+      const signature = members.map(item => item.id).sort().join("|");
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      metrics.evaluatedCombinations++;
+      const sum = round(members.reduce((total, member) => total + (mixedSigns ? member.comparisonAmount : Math.abs(member.comparisonAmount)), 0));
+      if (Math.abs(target - sum) > tolerance + .005) continue;
+      const systemMovements = type === "one-to-many" ? [anchor] : members;
+      const bankMovements = type === "one-to-many" ? members : [anchor];
+      const calculated = calculate(systemMovements, bankMovements, type);
+      if (!calculated.amountWithinTolerance || !calculated.dateWithinTolerance || calculated.score < config.possibleThreshold) continue;
+      calculated.bulk = true;
+      calculated.criterion = "Agrupación masiva por suma exacta";
+      calculated.reasons.push(`Se tomó el conjunto completo: ${variant.label}`);
+      calculated.reasons.push("La agrupación masiva se comprobó sin enumerar todas sus subcombinaciones");
+      results.push(calculated);
+    }
+    return results;
   }
 
   async function searchGroups(type, progressStart, progressEnd) {
-    if (metrics.combinationLimitReached || shouldCancel()) return shouldCancel();
+    if (shouldCancel()) return true;
     const systemRemaining = system.filter(item => !reserved.system.has(item.id));
     const bankRemaining = bank.filter(item => !reserved.bank.has(item.id));
     const anchors = type === "one-to-many" ? systemRemaining : bankRemaining;
     const pool = type === "one-to-many" ? bankRemaining : systemRemaining;
-    const poolByDate = buildIndex(pool, dateKey);
+    const mixedSigns = Boolean(config.allowMixedGroupSigns);
+    const poolByDate = buildIndex(pool, mixedSigns ? dayKey : dateKey);
     const candidates = [];
-    for (let anchorIndex = 0; anchorIndex < anchors.length && !metrics.combinationLimitReached; anchorIndex++) {
+    for (let anchorIndex = 0; anchorIndex < anchors.length; anchorIndex++) {
       const anchor = anchors[anchorIndex];
       const compatible = [];
       for (let offset = -config.dateTolerance; offset <= config.dateTolerance; offset++) {
-        const key = `${anchor.day + offset}|${signKey(anchor)}`;
+        const key = mixedSigns ? String(anchor.day + offset) : `${anchor.day + offset}|${signKey(anchor)}`;
         for (const member of poolByDate.get(key) || []) {
-          if (Math.abs(member.comparisonAmount) <= Math.abs(anchor.comparisonAmount) + amountTolerance(Math.abs(anchor.comparisonAmount)) + .005) compatible.push(member);
+          if (mixedSigns || Math.abs(member.comparisonAmount) <= Math.abs(anchor.comparisonAmount) + amountTolerance(Math.abs(anchor.comparisonAmount)) + .005) compatible.push(member);
         }
       }
-      compatible.sort((a, b) => Math.abs(Math.abs(a.comparisonAmount) - Math.abs(anchor.comparisonAmount)) - Math.abs(Math.abs(b.comparisonAmount) - Math.abs(anchor.comparisonAmount)));
+      compatible.sort((a, b) => similarity(anchor.description, b.description) - similarity(anchor.description, a.description)
+        || Math.abs(anchor.comparisonAmount - a.comparisonAmount) - Math.abs(anchor.comparisonAmount - b.comparisonAmount));
       if (compatible.length >= 2) {
-        const enumerated = await enumerateGroups(anchor, compatible.slice(0, 24), type);
-        candidates.push(...enumerated.results);
-        if (enumerated.cancelled) return true;
+        const bulkGroups = findBulkGroups(anchor, compatible, type);
+        candidates.push(...bulkGroups);
+        const hasStrongBulkGroup = bulkGroups.some(candidate => candidate.score >= config.autoThreshold);
+        if (!hasStrongBulkGroup) {
+          const subsetPoolSize = Math.min(compatible.length, Math.max(24, Math.min(32, config.maxGroupSize)));
+          const enumerated = await enumerateGroups(anchor, compatible.slice(0, subsetPoolSize), type);
+          candidates.push(...enumerated.results);
+          if (enumerated.cancelled) return true;
+        }
       }
       if (anchorIndex % 20 === 0 || anchorIndex === anchors.length - 1) {
-        emitProgress({ percent: progressStart + (progressEnd - progressStart) * ((anchorIndex + 1) / Math.max(1, anchors.length)), message: "Buscando agrupaciones por ventanas de fecha…", detail: `${anchorIndex + 1} de ${anchors.length} movimientos base` });
+        emitProgress({ percent: progressStart + (progressEnd - progressStart) * ((anchorIndex + 1) / Math.max(1, anchors.length)), message: "Buscando agrupaciones por ventanas de fecha…", detail: `${anchorIndex + 1} de ${anchors.length} movimientos base · ${metrics.limitedGroupAnchors} acotados` });
         await pause();
         if (shouldCancel()) return true;
       }
@@ -1673,8 +1932,182 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     return false;
   }
 
+  function internalDescriptionSimilarity(movements) {
+    if (movements.length < 2) return 0;
+    let total = 0;
+    for (let index = 0; index < movements.length; index++) {
+      let best = 0;
+      for (let other = 0; other < movements.length; other++) {
+        if (index !== other) best = Math.max(best, similarity(movements[index].description, movements[other].description));
+      }
+      total += best;
+    }
+    return total / movements.length;
+  }
+
+  function internalBusinessKey(description) {
+    const genericTokens = new Set(["cont", "contable", "gasto", "gastos", "factura", "credito", "debito", "pago", "pagos", "recibo", "transferencia", "movimiento", "ajuste", "caja", "banco", "cuota", "cuotas", "proveedor", "ingreso", "egreso"]);
+    const tokens = normalizeText(description).split(" ").filter(token => token.length >= 3 && /\p{L}/u.test(token) && !genericTokens.has(token));
+    return tokens.slice(0, 2).join("|");
+  }
+
+  function calculateInternal(movements, sourceKey, criterion) {
+    const net = round(movements.reduce((sum, movement) => sum + movement.comparisonAmount, 0));
+    const reference = Math.max(0, ...movements.map(movement => Math.abs(movement.comparisonAmount)));
+    const tolerance = amountTolerance(reference);
+    const amountWithinTolerance = Math.abs(net) <= tolerance + .005;
+    const days = movements.map(movement => movement.day);
+    const dateDifference = Math.max(...days) - Math.min(...days);
+    const dateWithinTolerance = dateDifference <= config.dateTolerance;
+    const descriptionSimilarity = config.considerDescription ? internalDescriptionSimilarity(movements) : 1;
+    let refsScore = 0;
+    for (let index = 0; index < movements.length && !refsScore; index++) {
+      for (let other = index + 1; other < movements.length && !refsScore; other++) {
+        refsScore = referencePoints([movements[index].description], [movements[other].description]);
+      }
+    }
+    const amountScore = amountWithinTolerance ? (Math.abs(net) <= .005 ? 45 : 40) : 0;
+    const dateScore = dateWithinTolerance ? (dateDifference === 0 ? 25 : 25 * Math.max(.35, 1 - dateDifference / (config.dateTolerance + 1))) : 0;
+    const penalty = Math.min(12, Math.log2(Math.max(1, movements.length - 1)) * 2)
+      + (movements.some(item => genericDescription(item.description)) ? 3 : 0);
+    const score = Math.round(clampValue(amountScore + dateScore + 20 * descriptionSimilarity + refsScore - penalty, 0, 100));
+    const label = sourceKey === "system" ? "sistema contable" : "caja o banco";
+    const reasons = [
+      Math.abs(net) <= .005 ? "Los Débitos y Créditos seleccionados dejan un neto de cero" : `El neto (${formatAmount(net)}) está dentro de la tolerancia`,
+      dateDifference === 0 ? "Los movimientos son del mismo día" : `Las fechas abarcan ${dateDifference} día(s)`,
+      config.considerDescription ? `Similitud interna de descripciones: ${Math.round(descriptionSimilarity * 100)}%` : "La comparación de descripciones está desactivada",
+      `La compensación ocurre dentro de ${label}; no necesita un movimiento del otro lado`
+    ];
+    if (refsScore) reasons.push("Se encontraron referencias numéricas coincidentes");
+    return {
+      id: null,
+      type: sourceKey === "system" ? "internal-system" : "internal-bank",
+      systemIds: sourceKey === "system" ? movements.map(item => item.id) : [],
+      bankIds: sourceKey === "bank" ? movements.map(item => item.id) : [],
+      totalSystem: sourceKey === "system" ? net : 0,
+      totalBank: sourceKey === "bank" ? net : 0,
+      totalBankOriginal: sourceKey === "bank" ? round(movements.reduce((sum, movement) => sum + movement.amount, 0)) : 0,
+      difference: net,
+      amountTolerance: tolerance,
+      amountWithinTolerance,
+      dateWithinTolerance,
+      dateDifference,
+      descriptionSimilarity,
+      score,
+      exact: Math.abs(net) <= .005 && dateWithinTolerance && (!config.considerDescription || descriptionSimilarity >= .7),
+      ambiguous: false,
+      alternativeCount: 0,
+      totalMembers: movements.length,
+      status: "possible",
+      criterion,
+      reasons,
+      observation: "",
+      createdAt: Date.now(),
+      manual: false
+    };
+  }
+
+  async function searchInternalOffsets(sourceKey, movements, reservedSet, progressStart, progressEnd) {
+    const remaining = movements.filter(item => !reservedSet.has(item.id) && Math.sign(item.comparisonAmount));
+    if (remaining.length < 2) return false;
+    const exactIndex = buildIndex(remaining, item => `${item.day}|${Math.sign(item.comparisonAmount)}|${Math.round(Math.abs(item.comparisonAmount) * 100)}`);
+    const relatedIndex = buildIndex(remaining, item => `${item.day}|${Math.sign(item.comparisonAmount)}|${Math.round(Math.abs(item.comparisonAmount) * 100)}|${internalBusinessKey(item.description)}`);
+    const pairCandidates = [];
+    const seenPairs = new Set();
+    for (let index = 0; index < remaining.length; index++) {
+      const anchor = remaining[index];
+      if (anchor.comparisonAmount > 0) {
+        const matches = [];
+        const matchIds = new Set();
+        const appendMatches = items => {
+          const start = items.length ? index % items.length : 0;
+          for (let step = 0; step < items.length; step++) {
+            if (matches.length >= 8) break;
+            const item = items[(start + step) % items.length];
+            if (!matchIds.has(item.id)) { matchIds.add(item.id); matches.push(item); }
+          }
+        };
+        const businessKey = internalBusinessKey(anchor.description);
+        for (let offset = -config.dateTolerance; offset <= config.dateTolerance; offset++) {
+          const key = `${anchor.day + offset}|-1|${Math.round(Math.abs(anchor.comparisonAmount) * 100)}`;
+          if (businessKey) appendMatches(relatedIndex.get(`${key}|${businessKey}`) || []);
+          appendMatches(exactIndex.get(key) || []);
+        }
+        matches.sort((a, b) => similarity(anchor.description, b.description) - similarity(anchor.description, a.description)
+          || Math.abs(anchor.day - a.day) - Math.abs(anchor.day - b.day));
+        // Evita materializar miles de parejas equivalentes cuando un archivo
+        // contiene muchos importes repetidos en la misma fecha.
+        for (const other of matches.slice(0, 4)) {
+          const signature = [anchor.id, other.id].sort().join("|");
+          if (anchor.id === other.id || seenPairs.has(signature)) continue;
+          seenPairs.add(signature);
+          const candidate = calculateInternal([anchor, other], sourceKey, "Compensación interna de Débito y Crédito");
+          if (candidate.amountWithinTolerance && candidate.dateWithinTolerance && candidate.score >= config.possibleThreshold) pairCandidates.push(candidate);
+        }
+      }
+      if (index % 250 === 0) {
+        emitProgress({ percent: progressStart + (progressEnd - progressStart) * .45 * ((index + 1) / remaining.length), message: "Buscando compensaciones internas…", detail: `${index + 1} de ${remaining.length} movimientos en ${sourceKey === "system" ? "sistema" : "caja/banco"}` });
+        await pause();
+        if (shouldCancel()) return true;
+      }
+    }
+    const candidatesByMovement = new Map();
+    pairCandidates.forEach(candidate => [...candidate.systemIds, ...candidate.bankIds].forEach(id => {
+      if (!candidatesByMovement.has(id)) candidatesByMovement.set(id, []);
+      candidatesByMovement.get(id).push(candidate);
+    }));
+    pairCandidates.forEach(candidate => {
+      const alternatives = new Set();
+      [...candidate.systemIds, ...candidate.bankIds].forEach(id => (candidatesByMovement.get(id) || []).forEach(other => {
+        if (other !== candidate && other.score >= candidate.score - 5) alternatives.add(other);
+      }));
+      candidate.ambiguous = alternatives.size > 0;
+      candidate.alternativeCount = alternatives.size;
+      if (candidate.ambiguous) {
+        candidate.score = Math.max(0, candidate.score - Math.min(15, 6 + alternatives.size * 2));
+        candidate.reasons.push(`${alternatives.size} compensación(es) alternativa(s) con puntuación similar`);
+      }
+    });
+    pairCandidates.sort((a, b) => b.score - a.score || a.dateDifference - b.dateDifference);
+    for (const candidate of pairCandidates) {
+      const ids = sourceKey === "system" ? candidate.systemIds : candidate.bankIds;
+      if (ids.some(id => reservedSet.has(id)) || candidate.score < config.possibleThreshold) continue;
+      candidate.status = candidate.score >= config.autoThreshold && !candidate.ambiguous ? "confirmed" : "possible";
+      addReconciliation(candidate);
+      ids.forEach(id => reservedSet.add(id));
+    }
+
+    const bulkRemaining = movements.filter(item => !reservedSet.has(item.id) && Math.sign(item.comparisonAmount));
+    const buckets = new Map();
+    bulkRemaining.forEach(item => {
+      const businessKey = internalBusinessKey(item.description);
+      if (!businessKey) return;
+      const key = `${item.day}|${businessKey}`;
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(item);
+    });
+    for (const members of buckets.values()) {
+      if (members.length < 2 || members.length > config.maxGroupSize) continue;
+      const signs = new Set(members.map(item => Math.sign(item.comparisonAmount)));
+      if (!signs.has(1) || !signs.has(-1)) continue;
+      const candidate = calculateInternal(members, sourceKey, "Compensación interna agrupada por fecha y descripción");
+      metrics.evaluatedCombinations++;
+      if (!candidate.amountWithinTolerance || !candidate.dateWithinTolerance || candidate.score < config.possibleThreshold) continue;
+      candidate.bulk = true;
+      candidate.reasons.push("Se comprobó el conjunto completo sin enumerar subcombinaciones");
+      candidate.status = candidate.score >= config.autoThreshold ? "confirmed" : "possible";
+      addReconciliation(candidate);
+      members.forEach(item => reservedSet.add(item.id));
+    }
+    emitProgress({ percent: progressEnd, message: "Compensaciones internas comprobadas…", detail: `${sourceKey === "system" ? "Sistema" : "Caja/banco"}: ${remaining.length.toLocaleString("es-UY")} movimientos inspeccionados` });
+    await pause();
+    return shouldCancel();
+  }
+
   if (config.searchOneToMany && await searchGroups("one-to-many", 56, 74)) return { cancelled: true, reconciliations: [], ...metrics };
   if (config.searchManyToOne && await searchGroups("many-to-one", 75, 92)) return { cancelled: true, reconciliations: [], ...metrics };
+  if (config.searchInternalOffsets && await searchInternalOffsets("system", system, reserved.system, 92, 94)) return { cancelled: true, reconciliations: [], ...metrics };
+  if (config.searchInternalOffsets && await searchInternalOffsets("bank", bank, reserved.bank, 94, 96)) return { cancelled: true, reconciliations: [], ...metrics };
   emitProgress({ percent: 96, message: "Consolidando resultados…", detail: `${reconciliations.length} conciliaciones propuestas` });
   await pause();
   return { cancelled: false, reconciliations, ...metrics };
@@ -1845,18 +2278,21 @@ function calculateReconciliation(systemMovements, bankMovements, type = inferTyp
   const dateScore = dateWithinTolerance
     ? state.config.dateTolerance === 0 ? 25 : 25 * Math.max(.35, 1 - averageDateDifference / (state.config.dateTolerance + 1))
     : 0;
-  const systemDescription = systemMovements.map(item => item.description).join(" ");
-  const bankDescription = bankMovements.map(item => item.description).join(" ");
-  const similarity = state.config.considerDescription ? descriptionSimilarity(systemDescription, bankDescription) : 1;
-  const descriptionScore = 20 * similarity;
+  const similarity = state.config.considerDescription ? groupedDescriptionSimilarity(systemMovements, bankMovements) : 1;
   const refsScore = referenceScore(systemMovements.map(item => item.description), bankMovements.map(item => item.description));
   const totalMembers = systemMovements.length + bankMovements.length;
+  const protectedGroupDescription = type !== "one-to-one" && state.config.considerDescription && similarity >= .82;
+  const descriptionScore = 20 * (protectedGroupDescription ? 1 : similarity);
   let penalty = 0;
-  if (type !== "one-to-one") penalty += Math.max(0, totalMembers - 3) * 2;
-  if (systemMovements.some(item => isGenericDescription(item.description)) || bankMovements.some(item => isGenericDescription(item.description))) penalty += 3;
+  if (type !== "one-to-one" && !protectedGroupDescription) penalty += Math.min(12, Math.log2(Math.max(1, totalMembers - 2)) * 2);
+  if (!protectedGroupDescription && (systemMovements.some(item => isGenericDescription(item.description)) || bankMovements.some(item => isGenericDescription(item.description)))) penalty += 3;
   if (dateDifference > 0) penalty += Math.min(5, dateDifference);
-  const score = Math.round(clamp(amountScore + dateScore + descriptionScore + refsScore - penalty, 0, 100));
-  const exact = Math.abs(difference) <= .005 && dateWithinTolerance && (!state.config.considerDescription || similarity >= .9);
+  let score = Math.round(clamp(amountScore + dateScore + descriptionScore + refsScore - penalty, 0, 100));
+  const exactAmountAndDate = Math.abs(difference) <= .005 && dateDifference === 0;
+  const exactAmountCompatibleDate = Math.abs(difference) <= .005 && dateWithinTolerance;
+  if (exactAmountAndDate) score = Math.max(score, type === "one-to-one" ? 90 : 85);
+  else if (exactAmountCompatibleDate) score = Math.max(score, type === "one-to-one" ? 85 : 80);
+  const exact = Math.abs(difference) <= .005 && dateWithinTolerance && (!state.config.considerDescription || similarity >= .9 || protectedGroupDescription);
   const reasons = [
     Math.abs(difference) <= .005 ? "Los importes coinciden exactamente" : `La diferencia de importe (${formatMoney(Math.abs(difference))}) está dentro de la tolerancia`,
     dateDifference === 0 ? "Las fechas coinciden" : `Las fechas difieren hasta ${dateDifference} día(s)`,
@@ -1864,6 +2300,8 @@ function calculateReconciliation(systemMovements, bankMovements, type = inferTyp
   ];
   if (refsScore) reasons.push("Se encontraron referencias numéricas coincidentes");
   if (type !== "one-to-one") reasons.push(`La suma de ${type === "one-to-many" ? bankMovements.length : systemMovements.length} movimientos coincide con el otro lado`);
+  if (protectedGroupDescription) reasons.push("La descripción comercial coincide; no se aplicó penalización por cantidad de movimientos");
+  if (exactAmountAndDate && similarity < .82) reasons.push("Monto y fecha exactos tuvieron prioridad sobre la diferencia de descripción");
   return {
     id: null,
     type,
@@ -1880,6 +2318,8 @@ function calculateReconciliation(systemMovements, bankMovements, type = inferTyp
     dateWithinTolerance,
     dateDifference,
     descriptionSimilarity: similarity,
+    protectedGroupDescription,
+    exactAmountAndDate,
     score,
     exact,
     ambiguous: false,
@@ -1894,6 +2334,81 @@ function calculateReconciliation(systemMovements, bankMovements, type = inferTyp
   };
 }
 
+function internalSelectionCanReconcile(movements) {
+  if (movements.length < 2) return false;
+  const amounts = movements.map(comparisonAmount).filter(amount => Math.abs(amount) > .005);
+  if (!amounts.some(amount => amount > 0) || !amounts.some(amount => amount < 0)) return false;
+  const net = roundMoney(amounts.reduce((sum, amount) => sum + amount, 0));
+  const reference = Math.max(0, ...amounts.map(Math.abs));
+  return Math.abs(net) <= amountToleranceFor(reference) + .005;
+}
+
+function manualSelectionCanReconcile(systemMovements, bankMovements) {
+  if (systemMovements.length && bankMovements.length) return true;
+  if (systemMovements.length) return internalSelectionCanReconcile(systemMovements);
+  if (bankMovements.length) return internalSelectionCanReconcile(bankMovements);
+  return false;
+}
+
+function calculateInternalReconciliation(movements, sourceKey, manual = false) {
+  const net = roundMoney(movements.reduce((sum, movement) => sum + comparisonAmount(movement), 0));
+  const reference = Math.max(0, ...movements.map(movement => Math.abs(comparisonAmount(movement))));
+  const tolerance = amountToleranceFor(reference);
+  const timestamps = movements.map(movement => movement.date.getTime());
+  const dateDifference = timestamps.length ? Math.round((Math.max(...timestamps) - Math.min(...timestamps)) / DATE_MS) : 0;
+  let similarity = 0;
+  if (!state.config.considerDescription) similarity = 1;
+  else if (movements.length >= 2) {
+    similarity = movements.reduce((sum, movement, index) => {
+      let best = 0;
+      movements.forEach((other, otherIndex) => {
+        if (index !== otherIndex) best = Math.max(best, descriptionSimilarity(movement.description, other.description));
+      });
+      return sum + best;
+    }, 0) / movements.length;
+  }
+  const amountWithinTolerance = Math.abs(net) <= tolerance + .005;
+  const dateWithinTolerance = dateDifference <= state.config.dateTolerance;
+  const amountScore = amountWithinTolerance ? (Math.abs(net) <= .005 ? 45 : 40) : 0;
+  const dateScore = dateWithinTolerance ? (dateDifference === 0 ? 25 : 25 * Math.max(.35, 1 - dateDifference / (state.config.dateTolerance + 1))) : 0;
+  const penalty = Math.min(12, Math.log2(Math.max(1, movements.length - 1)) * 2);
+  const score = Math.round(clamp(amountScore + dateScore + 20 * similarity - penalty, 0, 100));
+  const label = sourceKey === "system" ? "sistema contable" : "caja o banco";
+  return {
+    id: null,
+    type: sourceKey === "system" ? "internal-system" : "internal-bank",
+    systemIds: sourceKey === "system" ? movements.map(item => item.id) : [],
+    bankIds: sourceKey === "bank" ? movements.map(item => item.id) : [],
+    systemMovements: sourceKey === "system" ? movements : [],
+    bankMovements: sourceKey === "bank" ? movements : [],
+    totalSystem: sourceKey === "system" ? net : 0,
+    totalBank: sourceKey === "bank" ? net : 0,
+    totalBankOriginal: sourceKey === "bank" ? roundMoney(movements.reduce((sum, movement) => sum + movement.amount, 0)) : 0,
+    difference: net,
+    amountTolerance: tolerance,
+    amountWithinTolerance,
+    dateWithinTolerance,
+    dateDifference,
+    descriptionSimilarity: similarity,
+    score,
+    exact: Math.abs(net) <= .005,
+    ambiguous: false,
+    alternativeCount: 0,
+    totalMembers: movements.length,
+    status: manual ? "confirmed" : "possible",
+    criterion: manual ? `Compensación interna creada manualmente en ${label}` : `Compensación interna en ${label}`,
+    reasons: [
+      Math.abs(net) <= .005 ? "Los Débitos y Créditos seleccionados dejan un neto de cero" : `El neto (${formatMoney(net)}) está dentro de la tolerancia`,
+      dateDifference === 0 ? "Los movimientos son del mismo día" : `Las fechas abarcan ${dateDifference} día(s)`,
+      state.config.considerDescription ? `Similitud interna de descripciones: ${Math.round(similarity * 100)}%` : "La comparación de descripciones está desactivada",
+      manual ? "La selección fue confirmada manualmente" : "La compensación se encontró dentro de una sola tabla"
+    ],
+    observation: manual ? "Compensación interna manual" : "",
+    createdAt: new Date(),
+    manual
+  };
+}
+
 function addReconciliation(reconciliation) {
   reconciliation.id = `CON-${String(state.results.nextId++).padStart(5, "0")}`;
   state.results.reconciliations.push(reconciliation);
@@ -1904,6 +2419,8 @@ function amountToleranceFor(reference) {
 }
 
 function inferType(systemMovements, bankMovements) {
+  if (!bankMovements.length && systemMovements.length >= 2) return "internal-system";
+  if (!systemMovements.length && bankMovements.length >= 2) return "internal-bank";
   if (systemMovements.length === 1 && bankMovements.length === 1) return "one-to-one";
   if (systemMovements.length === 1) return "one-to-many";
   if (bankMovements.length === 1) return "many-to-one";
@@ -1968,7 +2485,55 @@ function calculateSummary() {
   };
 }
 
+function syncReviewControls() {
+  const typeFilter = document.getElementById("typeFilter");
+  const sortFilter = document.getElementById("sortResults");
+  const typeLabelElement = document.getElementById("typeFilterLabel");
+  const searchInput = document.getElementById("reviewSearch");
+  const approveAllButton = document.getElementById("approveAllPossibleBtn");
+  const retryPendingButton = document.getElementById("retryPendingBtn");
+  const isPending = state.review.tab === "pending";
+  const typeOptions = isPending
+    ? [["all", "Débitos y créditos"], ["debit", "Sólo débitos"], ["credit", "Sólo créditos"]]
+    : [["all", "Todos"], ["one-to-one", "Uno a uno"], ["one-to-many", "Uno a varios"], ["many-to-one", "Varios a uno"], ["internal", "Compensación interna"], ["manual", "Manual"]];
+  const sortOptions = isPending
+    ? [["date-desc", "Fecha más reciente"], ["date-asc", "Fecha más antigua"], ["difference-desc", "Mayor importe"]]
+    : [["score-desc", "Mayor confianza"], ["score-asc", "Menor confianza"], ["date-desc", "Fecha más reciente"], ["date-asc", "Fecha más antigua"], ["difference-desc", "Mayor diferencia"]];
+  if (!typeOptions.some(([value]) => value === state.review.type)) state.review.type = "all";
+  if (!sortOptions.some(([value]) => value === state.review.sort)) state.review.sort = isPending ? "date-desc" : "score-desc";
+  typeFilter.innerHTML = typeOptions.map(([value, label]) => `<option value="${value}"${value === state.review.type ? " selected" : ""}>${label}</option>`).join("");
+  sortFilter.innerHTML = sortOptions.map(([value, label]) => `<option value="${value}"${value === state.review.sort ? " selected" : ""}>${label}</option>`).join("");
+  typeLabelElement.textContent = isPending ? "Tipo de movimiento" : "Tipo de conciliación";
+  searchInput.placeholder = isPending ? "Filtrar pendientes por fecha, descripción o importe" : "Buscar fecha, descripción, importe o ID";
+  const possibleCount = state.results.reconciliations.filter(item => item.status === "possible").length;
+  approveAllButton.classList.toggle("hidden", state.review.tab !== "possible" || !possibleCount);
+  approveAllButton.innerHTML = `<i data-lucide="check-check"></i> Aprobar todos (${possibleCount})`;
+  const pendingCount = getPendingMovements("system").length + getPendingMovements("bank").length;
+  retryPendingButton.classList.toggle("hidden", !isPending || pendingCount < 2 || state.processing.running);
+  retryPendingButton.innerHTML = `<i data-lucide="scan-search"></i> Reanalizar pendientes (${pendingCount})`;
+}
+
+function approveAllPossible() {
+  const possible = state.results.reconciliations.filter(item => item.status === "possible");
+  if (!possible.length) return;
+  dom.reviewContent.querySelectorAll("[data-observation]").forEach(input => {
+    const item = findReconciliation(input.dataset.observation);
+    if (item) item.observation = input.value.trim();
+  });
+  const ambiguousCount = possible.filter(item => item.ambiguous).length;
+  const detail = ambiguousCount ? ` ${ambiguousCount} tienen alternativas marcadas como ambiguas.` : "";
+  if (!window.confirm(`Se aprobarán ${possible.length} conciliaciones posibles.${detail} ¿Desea continuar?`)) return;
+  possible.forEach(item => {
+    item.status = "confirmed";
+    if (!item.observation) item.observation = "Aprobada mediante acción masiva";
+  });
+  state.review.page = 1;
+  showToast("Conciliaciones aprobadas", `${possible.length} propuestas pasaron a conciliados.`, "success");
+  renderReview();
+}
+
 function renderReview() {
+  syncReviewControls();
   const summary = calculateSummary();
   const cards = [
     ["Movimientos", summary.total.toLocaleString("es-UY"), ""],
@@ -1985,6 +2550,7 @@ function renderReview() {
   document.querySelector('[data-tab-count="possible"]').textContent = summary.possibleReconciliations;
   document.querySelector('[data-tab-count="pending"]').textContent = summary.pendingCount;
   renderReviewContent();
+  refreshIcons(document.querySelector(".review-toolbar"));
 }
 
 function renderReviewContent() {
@@ -1993,7 +2559,9 @@ function renderReviewContent() {
     return;
   }
   let items = state.results.reconciliations.filter(item => item.status === state.review.tab);
-  if (state.review.type !== "all") items = items.filter(item => item.type === state.review.type || (state.review.type === "manual" && item.manual));
+  if (state.review.type !== "all") items = items.filter(item => item.type === state.review.type
+    || (state.review.type === "manual" && item.manual)
+    || (state.review.type === "internal" && item.type.startsWith("internal-")));
   if (state.review.search) items = items.filter(item => reconciliationSearchText(item).includes(state.review.search));
   items = sortReconciliations(items, state.review.sort);
   const pageCount = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
@@ -2006,7 +2574,7 @@ function renderReviewContent() {
     return;
   }
   const isPossible = state.review.tab === "possible";
-  dom.reviewContent.innerHTML = `<div class="table-scroll"><table class="data-table result-table"><thead><tr><th>ID / Estado</th><th>Tipo</th><th>Sistema contable</th><th>Caja o banco</th><th>Total sistema</th><th>Total caja/banco</th><th>Diferencia</th><th>Confianza</th><th>${isPossible ? "Observación / Acciones" : "Acciones"}</th></tr></thead><tbody>${pageItems.map(item => renderReconciliationRow(item, isPossible)).join("")}</tbody></table></div>`;
+  dom.reviewContent.innerHTML = `<div class="table-scroll result-table-scroll"><table class="data-table result-table"><colgroup><col class="result-col-id"><col class="result-col-type"><col class="result-col-description"><col class="result-col-description"><col class="result-col-total"><col class="result-col-total"><col class="result-col-difference"><col class="result-col-score"><col class="result-col-actions"></colgroup><thead><tr><th>ID / Estado</th><th>Tipo</th><th>Sistema contable</th><th>Caja o banco</th><th>Total sistema</th><th>Total caja/banco</th><th>Diferencia</th><th>Confianza</th><th>${isPossible ? "Observación / Acciones" : "Acciones"}</th></tr></thead><tbody>${pageItems.map(item => renderReconciliationRow(item, isPossible)).join("")}</tbody></table></div>`;
   bindResultTableEvents();
   renderPagination(items.length, pageCount);
   refreshIcons(dom.reviewContent);
@@ -2018,7 +2586,7 @@ function renderReconciliationRow(item, isPossible) {
   const actions = isPossible
     ? `<div class="tabular-actions"><input class="observation-input" data-observation="${item.id}" value="${escapeAttribute(item.observation)}" placeholder="Agregar observación"><button class="table-action approve" data-action="approve" data-id="${item.id}"><i data-lucide="check"></i>Aprobar</button><button class="table-action" data-action="edit" data-id="${item.id}"><i data-lucide="list-restart"></i>Editar</button><button class="table-action reject" data-action="reject" data-id="${item.id}"><i data-lucide="x"></i>Rechazar</button><button class="table-action" data-action="detail" data-id="${item.id}"><i data-lucide="info"></i>Motivo</button></div>`
     : `<div class="tabular-actions"><button class="table-action" data-action="detail" data-id="${item.id}"><i data-lucide="eye"></i>Ver detalle</button><button class="table-action reject" data-action="unmatch" data-id="${item.id}"><i data-lucide="unlink"></i>Quitar conciliación</button></div>`;
-  return `<tr class="result-row ${item.status}"><td><strong>${item.id}</strong><br>${statusBadge(item.status)}</td><td><span class="type-badge">${typeLabel(item)}</span></td><td class="descriptions"><strong>${escapeHtml(systemDescription.title)}</strong><span>${escapeHtml(systemDescription.subtitle)}</span></td><td class="descriptions"><strong>${escapeHtml(bankDescription.title)}</strong><span>${escapeHtml(bankDescription.subtitle)}</span></td><td class="amount">${formatMoney(item.totalSystem)}</td><td class="amount">${formatMoney(item.totalBank)}</td><td class="amount ${item.difference ? "negative" : ""}">${formatMoney(item.difference)}</td><td><span class="score-badge ${scoreClass(item.score)}">${item.score}</span></td><td>${actions}</td></tr>`;
+  return `<tr class="result-row ${item.status}"><td data-label="ID / Estado"><strong>${item.id}</strong><br>${statusBadge(item.status)}</td><td data-label="Tipo"><span class="type-badge">${typeLabel(item)}</span>${item.relaxedPass ? `<span class="retry-badge">Reanálisis</span>` : ""}</td><td data-label="Sistema contable" class="descriptions"><strong title="${escapeAttribute(systemDescription.title)}">${escapeHtml(systemDescription.title)}</strong><span>${escapeHtml(systemDescription.subtitle)}</span></td><td data-label="Caja o banco" class="descriptions"><strong title="${escapeAttribute(bankDescription.title)}">${escapeHtml(bankDescription.title)}</strong><span>${escapeHtml(bankDescription.subtitle)}</span></td><td data-label="Total sistema" class="amount">${formatMoney(item.totalSystem)}</td><td data-label="Total caja/banco" class="amount">${formatMoney(item.totalBank)}</td><td data-label="Diferencia" class="amount ${item.difference ? "negative" : ""}">${formatMoney(item.difference)}</td><td data-label="Confianza"><span class="score-badge ${scoreClass(item.score)}">${item.score}</span></td><td data-label="Acciones">${actions}</td></tr>`;
 }
 
 function bindResultTableEvents() {
@@ -2058,53 +2626,109 @@ function handleReconciliationAction(action, id) {
 }
 
 function renderPendingReview() {
-  let system = getPendingMovements("system");
-  let bank = getPendingMovements("bank");
+  const allPendingSystem = getPendingMovements("system");
+  const allPendingBank = getPendingMovements("bank");
+  const pendingIds = { system: new Set(allPendingSystem.map(item => item.id)), bank: new Set(allPendingBank.map(item => item.id)) };
+  [...state.review.selectedSystem].forEach(id => { if (!pendingIds.system.has(id)) state.review.selectedSystem.delete(id); });
+  [...state.review.selectedBank].forEach(id => { if (!pendingIds.bank.has(id)) state.review.selectedBank.delete(id); });
+  let system = allPendingSystem;
+  let bank = allPendingBank;
   if (state.review.search) {
     system = system.filter(item => movementSearchText(item).includes(state.review.search));
     bank = bank.filter(item => movementSearchText(item).includes(state.review.search));
   }
+  if (state.review.type !== "all") {
+    system = system.filter(item => item.type === state.review.type);
+    bank = bank.filter(item => item.type === state.review.type);
+  }
   system = sortPendingMovements(system, state.review.sort);
   bank = sortPendingMovements(bank, state.review.sort);
-  const pageCount = Math.max(1, Math.ceil(Math.max(system.length, bank.length) / PAGE_SIZE));
-  state.review.page = Math.min(state.review.page, pageCount);
-  const start = (state.review.page - 1) * PAGE_SIZE;
-  const systemPage = system.slice(start, start + PAGE_SIZE);
-  const bankPage = bank.slice(start, start + PAGE_SIZE);
   const selectedSystemMovements = movementsFromIds("system", state.review.selectedSystem);
   const selectedBankMovements = movementsFromIds("bank", state.review.selectedBank);
-  dom.reviewContent.innerHTML = `<div class="pending-wrap"><div class="manual-banner"><div><strong>Conciliación manual</strong><small>Seleccione al menos un movimiento de cada lado. La selección se conserva al cambiar de página.</small></div><button id="createManualBtn" class="button button-primary button-small" type="button" ${selectedSystemMovements.length && selectedBankMovements.length ? "" : "disabled"}><i data-lucide="link"></i> Crear conciliación (${selectedSystemMovements.length} ↔ ${selectedBankMovements.length})</button></div><div class="manual-grid">${renderPendingSide("system", systemPage, system)}${renderPendingSide("bank", bankPage, bank)}</div></div>`;
+  const selectedDifference = roundMoney(selectedSystemMovements.reduce((sum, item) => sum + comparisonAmount(item), 0) - selectedBankMovements.reduce((sum, item) => sum + comparisonAmount(item), 0));
+  const selectionReady = manualSelectionCanReconcile(selectedSystemMovements, selectedBankMovements);
+  dom.reviewContent.innerHTML = `<div class="pending-wrap"><div class="manual-banner"><div><strong>Conciliación manual</strong><small>Haga clic en cualquier parte de una fila. Puede cruzar ambos lados o seleccionar sólo Débitos y Créditos del mismo lado cuando su neto sea cero.</small><span id="manualSelectionDifference">Diferencia seleccionada: <b>${formatMoney(selectedDifference)}</b></span></div><button id="createManualBtn" class="button button-primary button-small" type="button" ${selectionReady ? "" : "disabled"}><i data-lucide="link"></i> Crear conciliación (${selectedSystemMovements.length} ↔ ${selectedBankMovements.length})</button></div><div class="manual-grid">${renderPendingSide("system", system)}${renderPendingSide("bank", bank)}</div></div>`;
   dom.reviewContent.querySelectorAll("[data-pending-select]").forEach(checkbox => {
+    checkbox.addEventListener("click", event => event.stopPropagation());
     checkbox.addEventListener("change", () => {
       const sourceKey = checkbox.dataset.source;
       const selection = sourceKey === "system" ? state.review.selectedSystem : state.review.selectedBank;
       if (checkbox.checked) selection.add(checkbox.value); else selection.delete(checkbox.value);
-      renderPendingReview();
+      checkbox.closest("tr")?.classList.toggle("selected", checkbox.checked);
+      checkbox.closest("tr")?.setAttribute("aria-selected", String(checkbox.checked));
+      updatePendingSelectionSummary();
     });
   });
+  dom.reviewContent.querySelectorAll("[data-pending-row]").forEach(row => {
+    const toggle = () => {
+      const checkbox = row.querySelector("[data-pending-select]");
+      checkbox.checked = !checkbox.checked;
+      checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    row.addEventListener("click", event => { if (!event.target.closest("input, button, a")) toggle(); });
+    row.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(); } });
+  });
+  dom.reviewContent.querySelectorAll("[data-select-filtered]").forEach(button => button.addEventListener("click", () => {
+    const sourceKey = button.dataset.selectFiltered;
+    const items = sourceKey === "system" ? system : bank;
+    const selection = sourceKey === "system" ? state.review.selectedSystem : state.review.selectedBank;
+    items.forEach(item => selection.add(item.id));
+    renderPendingReview();
+  }));
+  dom.reviewContent.querySelectorAll("[data-clear-selection]").forEach(button => button.addEventListener("click", () => {
+    const selection = button.dataset.clearSelection === "system" ? state.review.selectedSystem : state.review.selectedBank;
+    selection.clear();
+    renderPendingReview();
+  }));
   document.getElementById("createManualBtn")?.addEventListener("click", createManualReconciliation);
-  renderPagination(Math.max(system.length, bank.length), pageCount);
+  dom.pagination.innerHTML = `<span>${system.length.toLocaleString("es-UY")} pendientes visibles del sistema · ${bank.length.toLocaleString("es-UY")} de caja o banco</span>`;
   refreshIcons(dom.reviewContent);
 }
 
-function renderPendingSide(sourceKey, pageItems, allItems) {
+function renderPendingSide(sourceKey, allItems) {
   const label = sourceKey === "system" ? (state.sources.system.name || "Sistema contable") : (state.sources.bank.name || "Caja o banco");
   const selection = sourceKey === "system" ? state.review.selectedSystem : state.review.selectedBank;
-  const total = allItems.reduce((sum, item) => sum + comparisonAmount(item), 0);
-  return `<section class="pending-side"><h3>${escapeHtml(label)} <span>${allItems.length} pendientes</span></h3><div class="table-scroll"><table class="data-table pending-table"><thead><tr><th></th><th>Fila</th><th>Fecha</th><th>Descripción</th><th>Tipo</th><th class="amount">Monto</th></tr></thead><tbody>${pageItems.length ? pageItems.map(item => `<tr class="${selection.has(item.id) ? "selected" : ""}"><td><input type="checkbox" data-pending-select data-source="${sourceKey}" value="${item.id}" ${selection.has(item.id) ? "checked" : ""} aria-label="Seleccionar fila ${item.row}"></td><td>${item.row}</td><td>${formatDate(item.date)}</td><td>${escapeHtml(item.description)}</td><td><span class="type-badge">${movementTypeLabel(item.type)}</span></td><td class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</td></tr>`).join("") : `<tr><td colspan="6"><div class="empty-state"><div><p>No hay movimientos pendientes en esta página.</p></div></div></td></tr>`}</tbody></table></div><div class="pending-total"><span>Total pendiente visible</span><strong>${formatMoney(total)}</strong></div></section>`;
+  const selectedMovements = movementsFromIds(sourceKey, selection);
+  return `<section class="pending-side"><div class="pending-side-heading"><h3>${escapeHtml(label)} <span>${allItems.length} visibles</span></h3><div><button class="table-action" data-select-filtered="${sourceKey}" type="button"><i data-lucide="list-checks"></i> Seleccionar filtrados</button><button class="table-action" data-clear-selection="${sourceKey}" type="button">Limpiar lado</button></div></div><div class="table-scroll pending-scroll"><table class="data-table pending-table"><colgroup><col class="pending-col-check"><col class="pending-col-row"><col class="pending-col-date"><col class="pending-col-description"><col class="pending-col-type"><col class="pending-col-amount"></colgroup><thead><tr><th></th><th>Fila</th><th>Fecha</th><th>Descripción</th><th>Tipo</th><th class="amount">Monto</th></tr></thead><tbody>${allItems.length ? allItems.map(item => `<tr data-pending-row data-source="${sourceKey}" data-id="${item.id}" tabindex="0" aria-selected="${selection.has(item.id)}" class="${selection.has(item.id) ? "selected" : ""}"><td><input type="checkbox" data-pending-select data-source="${sourceKey}" value="${item.id}" ${selection.has(item.id) ? "checked" : ""} aria-label="Seleccionar fila ${item.row}"></td><td>${item.row}</td><td>${formatDate(item.date)}</td><td class="pending-description" title="${escapeAttribute(item.description)}">${escapeHtml(item.description)}</td><td><span class="type-badge">${movementTypeLabel(item.type)}</span></td><td class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</td></tr>`).join("") : `<tr><td colspan="6"><div class="empty-state"><div><p>No hay movimientos para los filtros actuales.</p></div></div></td></tr>`}</tbody></table></div><div class="pending-total pending-selected-total" id="pendingTotals-${sourceKey}">${renderSelectedMovementTotals(selectedMovements)}</div></section>`;
+}
+
+function renderSelectedMovementTotals(movements) {
+  const debit = roundMoney(movements.filter(item => item.type === "debit").reduce((sum, item) => sum + comparisonAmount(item), 0));
+  const credit = roundMoney(movements.filter(item => item.type === "credit").reduce((sum, item) => sum + comparisonAmount(item), 0));
+  const net = roundMoney(movements.reduce((sum, item) => sum + comparisonAmount(item), 0));
+  return `<span><b>${movements.length}</b> seleccionados</span><span>Débito <strong>${formatMoney(debit)}</strong></span><span>Crédito <strong>${formatMoney(credit)}</strong></span><span>Neto <strong>${formatMoney(net)}</strong></span>`;
+}
+
+function updatePendingSelectionSummary() {
+  const systemMovements = movementsFromIds("system", state.review.selectedSystem);
+  const bankMovements = movementsFromIds("bank", state.review.selectedBank);
+  const systemTotal = systemMovements.reduce((sum, item) => sum + comparisonAmount(item), 0);
+  const bankTotal = bankMovements.reduce((sum, item) => sum + comparisonAmount(item), 0);
+  const difference = roundMoney(systemTotal - bankTotal);
+  const createButton = document.getElementById("createManualBtn");
+  createButton.disabled = !manualSelectionCanReconcile(systemMovements, bankMovements);
+  createButton.innerHTML = `<i data-lucide="link"></i> Crear conciliación (${systemMovements.length} ↔ ${bankMovements.length})`;
+  document.getElementById("manualSelectionDifference").innerHTML = `Diferencia seleccionada: <b>${formatMoney(difference)}</b>`;
+  document.getElementById("pendingTotals-system").innerHTML = renderSelectedMovementTotals(systemMovements);
+  document.getElementById("pendingTotals-bank").innerHTML = renderSelectedMovementTotals(bankMovements);
+  refreshIcons(createButton);
 }
 
 function createManualReconciliation() {
   const systemMovements = movementsFromIds("system", state.review.selectedSystem);
   const bankMovements = movementsFromIds("bank", state.review.selectedBank);
-  if (!systemMovements.length || !bankMovements.length) return;
-  const reconciliation = calculateReconciliation(systemMovements, bankMovements, "manual");
+  if (!manualSelectionCanReconcile(systemMovements, bankMovements)) return;
+  const reconciliation = systemMovements.length && bankMovements.length
+    ? calculateReconciliation(systemMovements, bankMovements, "manual")
+    : calculateInternalReconciliation(systemMovements.length ? systemMovements : bankMovements, systemMovements.length ? "system" : "bank", true);
   reconciliation.status = "confirmed";
   reconciliation.manual = true;
   reconciliation.ambiguous = false;
-  reconciliation.criterion = "Conciliación creada manualmente por el usuario";
-  reconciliation.reasons.push("La selección fue confirmada manualmente");
-  reconciliation.observation = "Conciliación manual";
+  if (systemMovements.length && bankMovements.length) {
+    reconciliation.criterion = "Conciliación creada manualmente por el usuario";
+    reconciliation.reasons.push("La selección fue confirmada manualmente");
+    reconciliation.observation = "Conciliación manual";
+  }
   addReconciliation(reconciliation);
   state.review.selectedSystem.clear();
   state.review.selectedBank.clear();
@@ -2122,7 +2746,7 @@ function openReconciliationDetail(item) {
 }
 
 function renderDetailSide(title, movements) {
-  return `<section class="detail-side"><h3>${escapeHtml(title)} · ${movements.length} movimiento(s)</h3>${movements.map(item => `<article class="detail-movement"><header><span>Fila ${item.row} · ${formatDate(item.date)}</span><strong class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</strong></header><p>${escapeHtml(item.description)}</p><small>${movementTypeLabel(item.type)}${item.status ? ` · Estado original: ${escapeHtml(item.status)}` : ""}</small></article>`).join("")}</section>`;
+  return `<section class="detail-side"><h3>${escapeHtml(title)} · ${movements.length} movimiento(s)</h3>${movements.length ? movements.map(item => `<article class="detail-movement"><header><span>Fila ${item.row} · ${formatDate(item.date)}</span><strong class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</strong></header><p>${escapeHtml(item.description)}</p><small>${movementTypeLabel(item.type)}${item.status ? ` · Estado original: ${escapeHtml(item.status)}` : ""}</small></article>`).join("") : `<div class="detail-movement"><p>Sin contraparte: los movimientos se compensan dentro de la otra tabla.</p></div>`}</section>`;
 }
 
 function openEditGroup(item) {
@@ -2132,18 +2756,74 @@ function openEditGroup(item) {
     other.systemIds.forEach(id => reservedByOthers.system.add(id));
     other.bankIds.forEach(id => reservedByOthers.bank.add(id));
   });
-  const availableSystem = state.sources.system.movements.filter(movement => !reservedByOthers.system.has(movement.id));
-  const availableBank = state.sources.bank.movements.filter(movement => !reservedByOthers.bank.has(movement.id));
-  const container = document.getElementById("editGroupContent");
-  container.innerHTML = renderEditSide("system", availableSystem, new Set(item.systemIds)) + renderEditSide("bank", availableBank, new Set(item.bankIds));
-  container.querySelectorAll("[data-group-select]").forEach(checkbox => checkbox.addEventListener("change", updateEditGroupTotals));
-  updateEditGroupTotals();
+  state.review.editAvailableSystem = state.sources.system.movements.filter(movement => !reservedByOthers.system.has(movement.id));
+  state.review.editAvailableBank = state.sources.bank.movements.filter(movement => !reservedByOthers.bank.has(movement.id));
+  state.review.editSelectedSystem = new Set(item.systemIds);
+  state.review.editSelectedBank = new Set(item.bankIds);
+  state.review.editSearchSystem = "";
+  state.review.editSearchBank = "";
+  renderEditGroupContent();
   dom.editGroupDialog.showModal();
 }
 
-function renderEditSide(sourceKey, movements, selected) {
+function getFilteredEditMovements(sourceKey) {
+  const movements = sourceKey === "system" ? state.review.editAvailableSystem : state.review.editAvailableBank;
+  const search = sourceKey === "system" ? state.review.editSearchSystem : state.review.editSearchBank;
+  return search ? movements.filter(item => movementSearchText(item).includes(search)) : movements;
+}
+
+function renderEditGroupContent() {
+  const container = document.getElementById("editGroupContent");
+  container.innerHTML = renderEditSide("system") + renderEditSide("bank");
+  container.querySelectorAll("[data-edit-search]").forEach(input => input.addEventListener("input", () => {
+    const sourceKey = input.dataset.editSearch;
+    if (sourceKey === "system") state.review.editSearchSystem = input.value.trim().toLowerCase();
+    else state.review.editSearchBank = input.value.trim().toLowerCase();
+    renderEditGroupContent();
+    const nextInput = document.querySelector(`[data-edit-search="${sourceKey}"]`);
+    nextInput?.focus();
+    nextInput?.setSelectionRange(nextInput.value.length, nextInput.value.length);
+  }));
+  container.querySelectorAll("[data-group-select]").forEach(checkbox => {
+    checkbox.addEventListener("click", event => event.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      const selection = checkbox.dataset.source === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
+      if (checkbox.checked) selection.add(checkbox.value); else selection.delete(checkbox.value);
+      checkbox.closest("tr")?.classList.toggle("selected", checkbox.checked);
+      checkbox.closest("tr")?.setAttribute("aria-selected", String(checkbox.checked));
+      updateEditGroupTotals();
+    });
+  });
+  container.querySelectorAll("[data-group-row]").forEach(row => {
+    const toggle = () => {
+      const checkbox = row.querySelector("[data-group-select]");
+      checkbox.checked = !checkbox.checked;
+      checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    row.addEventListener("click", event => { if (!event.target.closest("input, button, a")) toggle(); });
+    row.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(); } });
+  });
+  container.querySelectorAll("[data-edit-select-filtered]").forEach(button => button.addEventListener("click", () => {
+    const sourceKey = button.dataset.editSelectFiltered;
+    const selection = sourceKey === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
+    getFilteredEditMovements(sourceKey).forEach(item => selection.add(item.id));
+    renderEditGroupContent();
+  }));
+  container.querySelectorAll("[data-edit-clear]").forEach(button => button.addEventListener("click", () => {
+    const selection = button.dataset.editClear === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
+    selection.clear();
+    renderEditGroupContent();
+  }));
+  updateEditGroupTotals();
+  refreshIcons(container);
+}
+
+function renderEditSide(sourceKey) {
   const label = sourceKey === "system" ? "Sistema contable" : "Caja o banco";
-  return `<section class="pending-side"><h3>${label}<span>${movements.length} disponibles</span></h3><div class="table-scroll"><table class="data-table pending-table"><thead><tr><th></th><th>Fila</th><th>Fecha</th><th>Descripción</th><th class="amount">Monto</th></tr></thead><tbody>${movements.map(item => `<tr><td><input data-group-select data-source="${sourceKey}" type="checkbox" value="${item.id}" ${selected.has(item.id) ? "checked" : ""}></td><td>${item.row}</td><td>${formatDate(item.date)}</td><td>${escapeHtml(item.description)}</td><td class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</td></tr>`).join("")}</tbody></table></div></section>`;
+  const movements = getFilteredEditMovements(sourceKey);
+  const selected = sourceKey === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
+  const search = sourceKey === "system" ? state.review.editSearchSystem : state.review.editSearchBank;
+  return `<section class="pending-side edit-pending-side"><h3>${label}<span>${movements.length} visibles</span></h3><div class="edit-side-tools"><label class="search-field"><i data-lucide="search"></i><input data-edit-search="${sourceKey}" type="search" value="${escapeAttribute(search)}" placeholder="Filtrar este lado"></label><div><button class="table-action" data-edit-select-filtered="${sourceKey}" type="button"><i data-lucide="list-checks"></i> Seleccionar filtrados</button><button class="table-action" data-edit-clear="${sourceKey}" type="button">Limpiar</button></div></div><div class="table-scroll"><table class="data-table pending-table"><colgroup><col class="pending-col-check"><col class="pending-col-row"><col class="pending-col-date"><col class="pending-col-description"><col class="pending-col-type"><col class="pending-col-amount"></colgroup><thead><tr><th></th><th>Fila</th><th>Fecha</th><th>Descripción</th><th>Tipo</th><th class="amount">Monto</th></tr></thead><tbody>${movements.length ? movements.map(item => `<tr data-group-row tabindex="0" aria-selected="${selected.has(item.id)}" class="${selected.has(item.id) ? "selected" : ""}"><td><input data-group-select data-source="${sourceKey}" type="checkbox" value="${item.id}" ${selected.has(item.id) ? "checked" : ""}></td><td>${item.row}</td><td>${formatDate(item.date)}</td><td class="pending-description" title="${escapeAttribute(item.description)}">${escapeHtml(item.description)}</td><td><span class="type-badge">${movementTypeLabel(item.type)}</span></td><td class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</td></tr>`).join("") : `<tr><td colspan="6">No hay movimientos para este filtro.</td></tr>`}</tbody></table></div></section>`;
 }
 
 function updateEditGroupTotals() {
@@ -2153,14 +2833,19 @@ function updateEditGroupTotals() {
   const totalSystem = systemMovements.reduce((sum, item) => sum + comparisonAmount(item), 0);
   const totalBank = bankMovements.reduce((sum, item) => sum + comparisonAmount(item), 0);
   const difference = roundMoney(totalSystem - totalBank);
-  document.getElementById("editGroupTotals").innerHTML = `<div><span>Total sistema</span><strong>${formatMoney(totalSystem)}</strong></div><div><span>Total caja / banco</span><strong>${formatMoney(totalBank)}</strong></div><div><span>Diferencia</span><strong>${formatMoney(difference)}</strong></div>`;
-  document.getElementById("saveGroupBtn").disabled = !systemMovements.length || !bankMovements.length;
+  document.getElementById("editGroupTotals").innerHTML = `<div>${renderEditSideTotals("Sistema", systemMovements)}</div><div>${renderEditSideTotals("Caja / banco", bankMovements)}</div><div class="difference-total"><span>Diferencia neta</span><strong>${formatMoney(difference)}</strong><small>${systemMovements.length} ↔ ${bankMovements.length} movimientos</small></div>`;
+  document.getElementById("saveGroupBtn").disabled = !manualSelectionCanReconcile(systemMovements, bankMovements);
+}
+
+function renderEditSideTotals(label, movements) {
+  const debit = roundMoney(movements.filter(item => item.type === "debit").reduce((sum, item) => sum + comparisonAmount(item), 0));
+  const credit = roundMoney(movements.filter(item => item.type === "credit").reduce((sum, item) => sum + comparisonAmount(item), 0));
+  const net = roundMoney(movements.reduce((sum, item) => sum + comparisonAmount(item), 0));
+  return `<span>${label} · ${movements.length}</span><small>Débito <b>${formatMoney(debit)}</b> · Crédito <b>${formatMoney(credit)}</b></small><strong>${formatMoney(net)}</strong>`;
 }
 
 function getEditGroupSelections() {
-  const selected = { system: new Set(), bank: new Set() };
-  document.querySelectorAll("[data-group-select]:checked").forEach(input => selected[input.dataset.source].add(input.value));
-  return selected;
+  return { system: new Set(state.review.editSelectedSystem), bank: new Set(state.review.editSelectedBank) };
 }
 
 function saveEditedGroup() {
@@ -2169,8 +2854,10 @@ function saveEditedGroup() {
   const selected = getEditGroupSelections();
   const systemMovements = movementsFromIds("system", selected.system);
   const bankMovements = movementsFromIds("bank", selected.bank);
-  if (!systemMovements.length || !bankMovements.length) return;
-  const updated = calculateReconciliation(systemMovements, bankMovements);
+  if (!manualSelectionCanReconcile(systemMovements, bankMovements)) return;
+  const updated = systemMovements.length && bankMovements.length
+    ? calculateReconciliation(systemMovements, bankMovements)
+    : calculateInternalReconciliation(systemMovements.length ? systemMovements : bankMovements, systemMovements.length ? "system" : "bank");
   Object.assign(current, updated, {
     id: current.id,
     status: "possible",
@@ -2253,11 +2940,14 @@ function movementSearchText(item) {
 }
 
 function summarizeMovements(movements) {
+  if (!movements.length) return { title: "Sin contraparte", subtitle: "Compensación dentro de la otra tabla" };
   if (movements.length === 1) return { title: movements[0].description, subtitle: `Fila ${movements[0].row} · ${formatDate(movements[0].date)}` };
   return { title: `${movements.length} movimientos`, subtitle: `${movements.map(item => `F${item.row}`).join(", ")} · ${formatDateRange(movements)}` };
 }
 
 function typeLabel(item) {
+  if (item.type === "internal-system") return "Compensación interna · Sistema";
+  if (item.type === "internal-bank") return "Compensación interna · Caja/banco";
   if (item.manual || item.type === "manual") return "Manual";
   return { "one-to-one": "Uno a uno", "one-to-many": "Uno a varios", "many-to-one": "Varios a uno" }[item.type] || item.type;
 }
@@ -2303,6 +2993,8 @@ function exportWorkbook() {
     };
     const summary = calculateSummary();
     const processingDate = state.results.processingAt || new Date();
+    const retryPasses = Array.isArray(state.results.retryPasses) ? state.results.retryPasses : [];
+    const lastRetry = retryPasses.at(-1);
     const summaryRows = [
       ["RESUMEN DE CONCILIACIÓN CONTABLE", ""],
       ["Fecha y hora de procesamiento", formatDateTime(processingDate)],
@@ -2321,19 +3013,27 @@ function exportWorkbook() {
       ["Tolerancia de fechas (días)", state.config.dateTolerance],
       ["Tolerancia absoluta de monto", state.config.amountAbsTolerance],
       ["Tolerancia porcentual de monto", state.config.amountPercentTolerance / 100],
-      ["Máximo por agrupación", state.config.maxGroupSize],
-      ["Límite de parejas candidatas", state.config.maxPairComparisons],
-      ["Límite de combinaciones agrupadas", state.config.maxCombinations],
+      ["Movimientos máximos por lado en una agrupación", state.config.maxGroupSize],
+      ["Tope de candidatos uno a uno", state.config.maxPairComparisons],
+      ["Intentos de suma por movimiento", state.config.maxCombinations],
       ["Comparar signos obligatoriamente", yesNo(state.config.requireSameSign)],
       ["Convención invertida entre tablas", yesNo(state.config.invertBetweenTables)],
+      ["Permitir Débitos y Créditos en una agrupación", yesNo(state.config.allowMixedGroupSigns)],
+      ["Buscar compensaciones dentro de una tabla", yesNo(state.config.searchInternalOffsets)],
+      ["Convención del sistema", splitConventionLabel(state.sources.system.splitConvention)],
+      ["Convención de caja o banco", splitConventionLabel(state.sources.bank.splitConvention)],
       ["Nivel automático", state.config.autoThreshold],
       ["Nivel posible", state.config.possibleThreshold],
       ["Motor de procesamiento", state.results.engineMode === "worker" ? "Web Worker indexado" : "Motor indexado compatible"],
       ["Parejas candidatas inspeccionadas", state.results.candidatePairs],
       ["Parejas puntuadas", state.results.evaluatedPairs],
       ["Combinaciones agrupadas evaluadas", state.results.evaluatedCombinations],
+      ["Movimientos base acotados", state.results.limitedGroupAnchors],
       ["Límite de parejas alcanzado", yesNo(state.results.pairLimitReached)],
-      ["Límite de agrupaciones alcanzado", yesNo(state.results.combinationLimitReached)]
+      ["Límite de agrupaciones alcanzado", yesNo(state.results.combinationLimitReached)],
+      ["Reanálisis flexibles de pendientes", retryPasses.length],
+      ["Último reanálisis flexible", lastRetry ? formatDateTime(lastRetry.at) : "No realizado"],
+      ["Parámetros del último reanálisis", lastRetry ? `${lastRetry.dateTolerance} días · tolerancia ${formatMoney(lastRetry.amountAbsTolerance)} · ${lastRetry.found} coincidencias` : ""]
     ];
     const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
     styleSummarySheet(summarySheet);
@@ -2492,6 +3192,7 @@ function appendSheet(workbook, worksheet, name) {
 }
 
 function showToast(title, message, type = "success", duration = 4200) {
+  while (dom.toastRegion.children.length >= 2) dom.toastRegion.firstElementChild.remove();
   const toast = document.createElement("div");
   toast.className = `toast ${type}`;
   toast.innerHTML = `<i data-lucide="${type === "success" ? "circle-check" : "triangle-alert"}"></i><div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(message)}</span></div>`;
@@ -2631,7 +3332,13 @@ window.ReconciliationApp = Object.freeze({
   normalizeDescription,
   descriptionSimilarity,
   calculateReconciliation,
+  calculateInternalReconciliation,
+  internalSelectionCanReconcile,
+  maybeAutoDetectSplitConvention,
   enumerateGroupCandidates,
+  reconciliationEngine,
+  retryPendingReconciliation,
+  cancelProcessing,
   normalizeSourceRow,
   getState: () => state
 });

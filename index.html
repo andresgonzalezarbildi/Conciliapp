@@ -79,7 +79,7 @@
             <label class="field"><span>Nombre de la tabla <small>opcional</small></span><input data-source-name type="text" maxlength="80" placeholder="Ej.: Mayor contable julio"></label>
             <label class="field"><span>Formato de importes</span><select data-format-mode><option value="auto">Detectar automáticamente</option><option value="signed">Monto con signo</option><option value="split">Débito y Crédito separados</option></select></label>
             <label class="field signed-option"><span>Un monto positivo representa</span><select data-positive-meaning><option value="debit">Débito</option><option value="credit">Crédito</option></select></label>
-            <label class="field split-option hidden"><span>Tratamiento del signo</span><select data-split-convention><option value="preserve">Conservar el signo original</option><option value="invert">Invertir todos los signos</option></select></label>
+            <label class="field split-option hidden"><span>Convención Débito / Crédito</span><select data-split-convention><option value="preserve">Conservar el signo escrito</option><option value="debit-positive">Débito positivo · Crédito negativo</option><option value="credit-positive">Débito negativo · Crédito positivo</option><option value="invert">Invertir el signo escrito</option></select><small>Permite asignar dirección contable aunque ambas columnas traigan importes positivos.</small></label>
             <label class="check-field split-option hidden"><input data-allow-both type="checkbox"><span>Aceptar filas con débito y crédito simultáneos</span></label>
           </div>
           <div class="drop-zone" data-drop-zone tabindex="0" role="button" aria-label="Seleccionar archivo del sistema contable">
@@ -119,7 +119,7 @@
             <label class="field"><span>Nombre de la tabla <small>opcional</small></span><input data-source-name type="text" maxlength="80" placeholder="Ej.: Estado de cuenta BROU"></label>
             <label class="field"><span>Formato de importes</span><select data-format-mode><option value="auto">Detectar automáticamente</option><option value="signed">Monto con signo</option><option value="split">Débito y Crédito separados</option></select></label>
             <label class="field signed-option"><span>Un monto positivo representa</span><select data-positive-meaning><option value="debit">Débito</option><option value="credit">Crédito</option></select></label>
-            <label class="field split-option hidden"><span>Tratamiento del signo</span><select data-split-convention><option value="preserve">Conservar el signo original</option><option value="invert">Invertir todos los signos</option></select></label>
+            <label class="field split-option hidden"><span>Convención Débito / Crédito</span><select data-split-convention><option value="preserve">Conservar el signo escrito</option><option value="debit-positive">Débito positivo · Crédito negativo</option><option value="credit-positive">Débito negativo · Crédito positivo</option><option value="invert">Invertir el signo escrito</option></select><small>Permite asignar dirección contable aunque ambas columnas traigan importes positivos.</small></label>
             <label class="check-field split-option hidden"><input data-allow-both type="checkbox"><span>Aceptar filas con débito y crédito simultáneos</span></label>
           </div>
           <div class="drop-zone" data-drop-zone tabindex="0" role="button" aria-label="Seleccionar archivo de caja o banco">
@@ -163,19 +163,21 @@
             <label class="check-field full"><input name="invertBetweenTables" type="checkbox"><span>Invertir la convención de signos entre las dos tablas</span></label>
           </div></fieldset>
           <fieldset class="config-section"><legend>Búsqueda y agrupaciones</legend><div class="config-grid">
-            <label class="field"><span>Máximo por agrupación</span><input name="maxGroupSize" type="number" min="2" max="12" step="1"></label>
-            <label class="field"><span>Límite de parejas candidatas</span><input name="maxPairComparisons" type="number" min="1000" max="10000000" step="1000"></label>
-            <label class="field"><span>Límite de combinaciones agrupadas</span><input name="maxCombinations" type="number" min="100" max="1000000" step="100"></label>
+            <label class="field"><span>Movimientos máximos por lado <small>en una agrupación</small></span><input name="maxGroupSize" type="number" min="2" max="500" step="1"></label>
+            <label class="field"><span>Tope de candidatos uno a uno <small>pares a inspeccionar</small></span><input name="maxPairComparisons" type="number" min="1000" max="20000000" step="1000"></label>
+            <label class="field"><span>Intentos de suma por movimiento <small>subcombinaciones</small></span><input name="maxCombinations" type="number" min="100" max="10000000" step="100"></label>
             <label class="check-field full"><input name="searchOneToOne" type="checkbox"><span>Buscar coincidencias uno a uno</span></label>
             <label class="check-field full"><input name="searchOneToMany" type="checkbox"><span>Buscar coincidencias uno a varios</span></label>
             <label class="check-field full"><input name="searchManyToOne" type="checkbox"><span>Buscar coincidencias varios a uno</span></label>
-          </div><div id="costWarning" class="inline-warning hidden"><i data-lucide="triangle-alert"></i><span></span></div></fieldset>
+            <label class="check-field full"><input name="allowMixedGroupSigns" type="checkbox"><span>Permitir compensar Débitos y Créditos dentro de una agrupación</span></label>
+            <label class="check-field full"><input name="searchInternalOffsets" type="checkbox"><span>Buscar movimientos que se anulan dentro de la misma tabla</span></label>
+          </div><p class="config-help">Las agrupaciones masivas exactas del mismo día se prueban primero. Si se habilitan las compensaciones, el motor suma los importes con su signo contable: por ejemplo, +150 y −50 pueden conciliar contra +100. También puede detectar un Débito y un Crédito que dejan neto cero dentro de Caja o del Sistema.</p><div id="costWarning" class="inline-warning hidden"><i data-lucide="triangle-alert"></i><span></span></div></fieldset>
           <fieldset class="config-section"><legend>Confianza</legend><div class="config-grid">
             <label class="field"><span>Conciliación automática <small>0–100</small></span><input name="autoThreshold" type="number" min="0" max="100" step="1"></label>
             <label class="field"><span>Posible conciliación <small>0–100</small></span><input name="possibleThreshold" type="number" min="0" max="100" step="1"></label>
             <label class="check-field full"><input name="considerDescription" type="checkbox"><span>Considerar similitud de descripciones</span></label>
             <label class="check-field full"><input name="excludeReconciled" type="checkbox"><span>Excluir filas ya conciliadas cuando se haya asignado una columna Estado</span></label>
-          </div></fieldset>
+          </div><p class="config-help">Cuando monto y fecha coinciden exactamente y no existe otra alternativa equivalente, el motor les da prioridad aunque las descripciones sean diferentes. En agrupaciones con un nombre comercial común no se descuenta puntaje por cantidad de movimientos.</p></fieldset>
           <fieldset class="config-section"><legend>Normalización de descripciones</legend><div class="config-grid">
             <label class="check-field"><input name="ignoreCase" type="checkbox"><span>Ignorar mayúsculas</span></label>
             <label class="check-field"><input name="ignoreAccents" type="checkbox"><span>Ignorar tildes</span></label>
@@ -212,12 +214,14 @@
         </div>
         <div class="review-toolbar">
           <label class="search-field"><i data-lucide="search"></i><input id="reviewSearch" type="search" placeholder="Buscar fecha, descripción, importe o ID"></label>
-          <label class="field inline"><span>Tipo</span><select id="typeFilter"><option value="all">Todos</option><option value="one-to-one">Uno a uno</option><option value="one-to-many">Uno a varios</option><option value="many-to-one">Varios a uno</option><option value="manual">Manual</option></select></label>
+          <label class="field inline"><span id="typeFilterLabel">Tipo de conciliación</span><select id="typeFilter"><option value="all">Todos</option><option value="one-to-one">Uno a uno</option><option value="one-to-many">Uno a varios</option><option value="many-to-one">Varios a uno</option><option value="manual">Manual</option></select></label>
           <label class="field inline"><span>Orden</span><select id="sortResults"><option value="score-desc">Mayor confianza</option><option value="score-asc">Menor confianza</option><option value="date-desc">Fecha más reciente</option><option value="date-asc">Fecha más antigua</option><option value="difference-desc">Mayor diferencia</option></select></label>
+          <button id="retryPendingBtn" class="button button-secondary button-small hidden" type="button" title="Segunda pasada sólo sobre pendientes: amplía fechas y redondeos y prioriza palabras comerciales compartidas"><i data-lucide="scan-search"></i> Reanalizar pendientes</button>
+          <button id="approveAllPossibleBtn" class="button button-secondary button-small hidden" type="button"><i data-lucide="check-check"></i> Aprobar todos</button>
         </div>
+        <div class="step-actions review-actions"><button class="button button-secondary" data-go-step="4" type="button"><i data-lucide="sliders-horizontal"></i> Ajustar configuración</button><button id="continueExportBtn" class="button button-primary" type="button">Ir a exportación <i data-lucide="arrow-right"></i></button></div>
         <div id="reviewContent" class="review-content"></div>
         <div id="pagination" class="pagination"></div>
-        <div class="step-actions"><button class="button button-secondary" data-go-step="4" type="button"><i data-lucide="sliders-horizontal"></i> Ajustar configuración</button><button id="continueExportBtn" class="button button-primary" type="button">Ir a exportación <i data-lucide="arrow-right"></i></button></div>
       </section>
 
       <section class="step-panel" data-panel="7">
@@ -240,7 +244,7 @@
       <div class="modal-header"><div><h2>Formatos admitidos</h2><p>La primera fila no vacía debe contener los encabezados.</p></div><button class="icon-button" value="cancel" aria-label="Cerrar"><i data-lucide="x"></i></button></div>
       <div class="format-examples">
         <section><div class="format-title"><span>A</span><div><strong>Monto con signo</strong><small>Configure si el signo positivo representa débito o crédito.</small></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Fecha</th><th>Descripción</th><th>Monto</th></tr></thead><tbody><tr><td>14/07/2026</td><td>Depósito caja</td><td class="amount">12.450,00</td></tr><tr><td>14/07/2026</td><td>Pago proveedor</td><td class="amount negative">−3.280,50</td></tr></tbody></table></div></section>
-        <section><div class="format-title"><span>B</span><div><strong>Débito y Crédito separados</strong><small>Cada fila debe usar una sola columna. El tipo se toma de la columna y el signo numérico se conserva.</small></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Fecha</th><th>Descripción</th><th>Débito</th><th>Crédito</th></tr></thead><tbody><tr><td>14/07/2026</td><td>Pago proveedor</td><td class="amount">3.280,50</td><td></td></tr><tr><td>14/07/2026</td><td>Depósito caja</td><td></td><td class="amount">12.450,00</td></tr></tbody></table></div></section>
+        <section><div class="format-title"><span>B</span><div><strong>Débito y Crédito separados</strong><small>Cada fila debe usar una sola columna. Si ambas columnas traen valores positivos, se detecta la convención Débito + / Crédito −; también puede cambiarla manualmente.</small></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Fecha</th><th>Descripción</th><th>Débito</th><th>Crédito</th></tr></thead><tbody><tr><td>14/07/2026</td><td>Pago proveedor</td><td class="amount">3.280,50</td><td></td></tr><tr><td>14/07/2026</td><td>Depósito caja</td><td></td><td class="amount">12.450,00</td></tr></tbody></table></div></section>
       </div>
       <div class="accepted-note"><i data-lucide="badge-check"></i><p>Se reconocen fechas de Excel y formatos habituales como <strong>1.234,56</strong>, <strong>1,234.56</strong>, <strong>$ 1.234,56</strong> y <strong>(1.234,56)</strong>.</p></div>
       <div class="modal-actions"><button class="button button-primary" value="default">Entendido</button></div>
