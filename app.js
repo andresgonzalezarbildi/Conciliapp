@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_BUILD = "2026.07.15-3";
+const APP_BUILD = "2026.07.16-2";
 
 const DEFAULT_CONFIG = Object.freeze({
   dateTolerance: 1,
@@ -3224,19 +3224,65 @@ function createManualReconciliation() {
 }
 
 function openReconciliationDetail(item) {
-  document.getElementById("detailTitle").textContent = `Detalle ${item.id}`;
-  document.getElementById("detailSubtitle").textContent = `${typeLabel(item)} · ${item.criterion}`;
-  const content = document.getElementById("detailContent");
-  content.innerHTML = `<div class="detail-grid">${renderDetailSide("Sistema contable", item.systemMovements)}${renderDetailSide("Caja o banco", item.bankMovements)}<div class="detail-summary"><div><span>Total sistema</span><strong>${formatMoney(item.totalSystem)}</strong></div><div><span>Total caja/banco</span><strong>${formatMoney(item.totalBank)}</strong></div><div><span>Diferencia</span><strong>${formatMoney(item.difference)}</strong></div><div><span>Confianza</span><strong>${item.score}/100</strong></div><div><span>Estado</span><strong>${item.status === "confirmed" ? "Conciliado" : "Posible"}</strong></div></div><div class="reason-list"><h3>Por qué se propuso</h3><ul>${item.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join("")}${item.ambiguous ? "<li>La combinación es ambigua y requiere aprobación manual.</li>" : ""}</ul></div><label class="field detail-observation"><span>Observación <small>se incluye en el Excel exportado</small></span><textarea data-detail-observation placeholder="Agregar una nota para esta conciliación">${escapeHtml(item.observation)}</textarea></label></div>`;
-  content.querySelector("[data-detail-observation]")?.addEventListener("input", event => {
-    item.observation = event.target.value.trim();
-  });
-  refreshIcons(content);
+  renderReconciliationDetail(item);
   dom.detailDialog.showModal();
 }
 
-function renderDetailSide(title, movements) {
-  return `<section class="detail-side"><h3>${escapeHtml(title)} · ${movements.length} movimiento(s)</h3>${movements.length ? movements.map(item => `<article class="detail-movement"><header><span>Fila ${item.row} · ${formatDate(item.date)}</span><strong class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</strong></header><p>${escapeHtml(item.description)}</p><small>${movementTypeLabel(item.type)}${item.status ? ` · Estado original: ${escapeHtml(item.status)}` : ""}</small></article>`).join("") : `<div class="detail-movement"><p>Sin contraparte: los movimientos se compensan dentro de la otra tabla.</p></div>`}</section>`;
+function renderReconciliationDetail(item) {
+  document.getElementById("detailTitle").textContent = `Detalle ${item.id}`;
+  document.getElementById("detailSubtitle").textContent = `${typeLabel(item)} · ${item.criterion}`;
+  const content = document.getElementById("detailContent");
+  content.innerHTML = `<div class="detail-grid">${renderDetailSide("Sistema contable", item.systemMovements, "system", item)}${renderDetailSide("Caja o banco", item.bankMovements, "bank", item)}<div class="detail-summary"><div><span>Total sistema</span><strong>${formatMoney(item.totalSystem)}</strong></div><div><span>Total caja/banco</span><strong>${formatMoney(item.totalBank)}</strong></div><div><span>Diferencia</span><strong>${formatMoney(item.difference)}</strong></div><div><span>Confianza</span><strong>${item.score}/100</strong></div><div><span>Estado</span><strong>${item.status === "confirmed" ? "Conciliado" : "Posible"}</strong></div></div><div class="reason-list"><h3>Por qué se propuso</h3><ul>${item.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join("")}${item.ambiguous ? "<li>La combinación es ambigua y requiere aprobación manual.</li>" : ""}</ul></div><label class="field detail-observation"><span>Observación <small>se incluye en el Excel exportado</small></span><textarea data-detail-observation placeholder="Agregar una nota para esta conciliación">${escapeHtml(item.observation)}</textarea></label></div>`;
+  content.querySelector("[data-detail-observation]")?.addEventListener("input", event => {
+    item.observation = event.target.value.trim();
+  });
+  content.querySelectorAll("[data-detail-remove]").forEach(button => button.addEventListener("click", () => {
+    removeMovementFromReconciliationDetail(item, button.dataset.source, button.dataset.detailRemove);
+  }));
+  refreshIcons(content);
+}
+
+function renderDetailSide(title, movements, sourceKey, reconciliation) {
+  const allowRemoval = reconciliation.status === "possible";
+  return `<section class="detail-side"><h3>${escapeHtml(title)} · ${movements.length} movimiento(s)</h3>${movements.length ? movements.map(item => {
+    const canRemove = allowRemoval && canRemoveMovementFromReconciliation(reconciliation, sourceKey, item.id);
+    const removeButton = allowRemoval ? `<button class="detail-remove-button" data-detail-remove="${escapeAttribute(item.id)}" data-source="${sourceKey}" type="button" ${canRemove ? "" : "disabled"} title="${canRemove ? "Quitar este movimiento de la propuesta" : "La propuesta debe conservar movimientos válidos en ambos lados"}"><i data-lucide="trash-2"></i> Quitar</button>` : "";
+    return `<article class="detail-movement"><header><span>Fila ${item.row} · ${formatDate(item.date)}</span><div class="detail-movement-heading-actions"><strong class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</strong>${removeButton}</div></header><p>${escapeHtml(item.description)}</p><small>${movementTypeLabel(item.type)}${item.status ? ` · Estado original: ${escapeHtml(item.status)}` : ""}</small></article>`;
+  }).join("") : `<div class="detail-movement"><p>Sin contraparte: los movimientos se compensan dentro de la otra tabla.</p></div>`}</section>`;
+}
+
+function canRemoveMovementFromReconciliation(reconciliation, sourceKey, movementId) {
+  const systemMovements = sourceKey === "system" ? reconciliation.systemMovements.filter(item => item.id !== movementId) : reconciliation.systemMovements;
+  const bankMovements = sourceKey === "bank" ? reconciliation.bankMovements.filter(item => item.id !== movementId) : reconciliation.bankMovements;
+  return manualSelectionCanReconcile(systemMovements, bankMovements);
+}
+
+function removeMovementFromReconciliationDetail(reconciliation, sourceKey, movementId) {
+  if (reconciliation.status !== "possible" || !canRemoveMovementFromReconciliation(reconciliation, sourceKey, movementId)) return;
+  const systemMovements = sourceKey === "system" ? reconciliation.systemMovements.filter(item => item.id !== movementId) : reconciliation.systemMovements;
+  const bankMovements = sourceKey === "bank" ? reconciliation.bankMovements.filter(item => item.id !== movementId) : reconciliation.bankMovements;
+  const removedMovement = (sourceKey === "system" ? reconciliation.systemMovements : reconciliation.bankMovements).find(item => item.id === movementId);
+  const originalSignature = reconciliationSignature(reconciliation);
+  const updated = systemMovements.length && bankMovements.length
+    ? calculateReconciliation(systemMovements, bankMovements)
+    : calculateInternalReconciliation(systemMovements.length ? systemMovements : bankMovements, systemMovements.length ? "system" : "bank");
+  const observation = reconciliation.observation;
+  rememberRejectedProposal(reconciliation, "Agrupación modificada desde el detalle");
+  state.review.rejectedSignatures.delete(reconciliationSignature(updated));
+  Object.assign(reconciliation, updated, {
+    id: reconciliation.id,
+    status: "possible",
+    observation,
+    ambiguous: false,
+    alternativeCount: 0,
+    criterion: "Agrupación ajustada desde el detalle; requiere aprobación",
+    manual: true
+  });
+  reconciliation.reasons.push(`Se quitó manualmente la fila ${removedMovement?.row ?? "seleccionada"} desde el detalle`);
+  if (originalSignature === reconciliationSignature(reconciliation)) state.review.rejectedSignatures.delete(originalSignature);
+  showToast("Movimiento quitado", "La propuesta y sus totales fueron recalculados.", "success");
+  renderReview();
+  renderReconciliationDetail(reconciliation);
 }
 
 function openEditGroup(item) {
@@ -3260,7 +3306,9 @@ function openEditGroup(item) {
 function getFilteredEditMovements(sourceKey) {
   const movements = sourceKey === "system" ? state.review.editAvailableSystem : state.review.editAvailableBank;
   const search = sourceKey === "system" ? state.review.editSearchSystem : state.review.editSearchBank;
-  return search ? movements.filter(item => movementSearchText(item).includes(search)) : movements;
+  const selected = sourceKey === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
+  const filtered = search ? movements.filter(item => movementSearchText(item).includes(search)) : [...movements];
+  return filtered.sort((left, right) => Number(selected.has(right.id)) - Number(selected.has(left.id)));
 }
 
 function renderEditGroupContent() {
@@ -3313,8 +3361,9 @@ function renderEditSide(sourceKey) {
   const label = sourceKey === "system" ? "Sistema contable" : "Caja o banco";
   const movements = getFilteredEditMovements(sourceKey);
   const selected = sourceKey === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
+  const selectedMovements = movementsFromIds(sourceKey, selected);
   const search = sourceKey === "system" ? state.review.editSearchSystem : state.review.editSearchBank;
-  return `<section class="pending-side edit-pending-side"><h3>${label}<span>${movements.length} visibles</span></h3><div class="edit-side-tools"><label class="search-field"><i data-lucide="search"></i><input data-edit-search="${sourceKey}" type="search" value="${escapeAttribute(search)}" placeholder="Filtrar este lado"></label><div><button class="table-action" data-edit-select-filtered="${sourceKey}" type="button"><i data-lucide="list-checks"></i> Seleccionar filtrados</button><button class="table-action" data-edit-clear="${sourceKey}" type="button">Limpiar</button></div></div><div class="table-scroll"><table class="data-table pending-table"><colgroup><col class="pending-col-check"><col class="pending-col-row"><col class="pending-col-date"><col class="pending-col-description"><col class="pending-col-type"><col class="pending-col-amount"></colgroup><thead><tr><th></th><th>Fila</th><th>Fecha</th><th>Descripción</th><th>Tipo</th><th class="amount">Monto</th></tr></thead><tbody>${movements.length ? movements.map(item => `<tr data-group-row tabindex="0" aria-selected="${selected.has(item.id)}" class="${selected.has(item.id) ? "selected" : ""}"><td><input data-group-select data-source="${sourceKey}" type="checkbox" value="${item.id}" ${selected.has(item.id) ? "checked" : ""}></td><td>${item.row}</td><td>${formatDate(item.date)}</td><td class="pending-description" title="${escapeAttribute(item.description)}">${escapeHtml(item.description)}</td><td><span class="type-badge">${movementTypeLabel(item.type)}</span></td><td class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</td></tr>`).join("") : `<tr><td colspan="6">No hay movimientos para este filtro.</td></tr>`}</tbody></table></div></section>`;
+  return `<section class="pending-side edit-pending-side"><h3>${label}<span>${movements.length} visibles</span></h3><div class="edit-side-tools"><label class="search-field"><i data-lucide="search"></i><input data-edit-search="${sourceKey}" type="search" value="${escapeAttribute(search)}" placeholder="Filtrar este lado"></label><div><button class="table-action" data-edit-select-filtered="${sourceKey}" type="button"><i data-lucide="list-checks"></i> Seleccionar filtrados</button><button class="table-action" data-edit-clear="${sourceKey}" type="button">Limpiar</button></div></div><div class="table-scroll"><table class="data-table pending-table"><colgroup><col class="pending-col-check"><col class="pending-col-row"><col class="pending-col-date"><col class="pending-col-description"><col class="pending-col-type"><col class="pending-col-amount"></colgroup><thead><tr><th></th><th>Fila</th><th>Fecha</th><th>Descripción</th><th>Tipo</th><th class="amount">Monto</th></tr></thead><tbody>${movements.length ? movements.map(item => `<tr data-group-row tabindex="0" aria-selected="${selected.has(item.id)}" class="${selected.has(item.id) ? "selected" : ""}"><td><input data-group-select data-source="${sourceKey}" type="checkbox" value="${item.id}" ${selected.has(item.id) ? "checked" : ""}></td><td>${item.row}</td><td>${formatDate(item.date)}</td><td class="pending-description" title="${escapeAttribute(item.description)}">${escapeHtml(item.description)}</td><td><span class="type-badge">${movementTypeLabel(item.type)}</span></td><td class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</td></tr>`).join("") : `<tr><td colspan="6">No hay movimientos para este filtro.</td></tr>`}</tbody></table></div><div class="pending-total pending-selected-total edit-selected-total" id="editSideTotals-${sourceKey}">${renderSelectedMovementTotals(selectedMovements)}</div></section>`;
 }
 
 function updateEditGroupTotals() {
@@ -3325,6 +3374,10 @@ function updateEditGroupTotals() {
   const totalBank = bankMovements.reduce((sum, item) => sum + comparisonAmount(item), 0);
   const difference = roundMoney(totalSystem - totalBank);
   document.getElementById("editGroupTotals").innerHTML = `<div>${renderEditSideTotals("Sistema", systemMovements)}</div><div>${renderEditSideTotals("Caja / banco", bankMovements)}</div><div class="difference-total"><span>Diferencia neta</span><strong>${formatMoney(difference)}</strong><small>${systemMovements.length} ↔ ${bankMovements.length} movimientos</small></div>`;
+  const systemFooter = document.getElementById("editSideTotals-system");
+  const bankFooter = document.getElementById("editSideTotals-bank");
+  if (systemFooter) systemFooter.innerHTML = renderSelectedMovementTotals(systemMovements);
+  if (bankFooter) bankFooter.innerHTML = renderSelectedMovementTotals(bankMovements);
   document.getElementById("saveGroupBtn").disabled = !manualSelectionCanReconcile(systemMovements, bankMovements);
 }
 
