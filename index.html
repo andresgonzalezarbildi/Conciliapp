@@ -7,15 +7,15 @@
   <meta name="description" content="Herramienta local para conciliación de movimientos contables, de caja y banco.">
   <title>Conciliación contable</title>
   <link rel="icon" href="favicon.png" type="image/png">
-  <link rel="stylesheet" href="styles.css?v=20260717-7">
+  <link rel="stylesheet" href="styles.css?v=20260717-8">
   <script defer src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script defer src="app.js?v=20260717-7"></script>
+  <script defer src="app.js?v=20260717-8"></script>
 </head>
 <body>
   <header class="app-header">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true"><i data-lucide="landmark"></i></span>
+      <span class="brand-mark" aria-hidden="true"><img src="favicon.png" alt=""></span>
       <div>
         <strong>Conciliación contable</strong>
         <span>Herramienta de control administrativo</span>
@@ -101,8 +101,8 @@
               <label class="field"><span>Primera fila de datos</span><input data-data-start-row type="number" min="1" step="1"></label>
               <label class="field"><span>Última fila <small>opcional</small></span><input data-data-end-row type="number" min="1" step="1" placeholder="Hasta el final"></label>
               <label class="field column-block-field hidden" data-column-block-field><span>Tabla dentro de la hoja</span><select data-column-block></select></label>
-              <label class="field"><span>Fecha desde <small>dd/mm/aaaa · opcional</small></span><input data-date-from data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
-              <label class="field"><span>Fecha hasta <small>dd/mm/aaaa · opcional</small></span><input data-date-to data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
+              <label class="field"><span>Fecha desde <small>dd/mm/aaaa o dd/mm/aa · opcional</small></span><input data-date-from data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
+              <label class="field"><span>Fecha hasta <small>dd/mm/aaaa o dd/mm/aa · opcional</small></span><input data-date-to data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
               <label class="field import-option-wide"><span>Omitir descripciones exactas <small>separadas por coma</small></span><input data-excluded-descriptions type="text" placeholder="Ej.: saldo inicial, totales"></label>
             </div>
             <div class="mapping-grid" data-mapping-grid></div>
@@ -141,8 +141,8 @@
               <label class="field"><span>Primera fila de datos</span><input data-data-start-row type="number" min="1" step="1"></label>
               <label class="field"><span>Última fila <small>opcional</small></span><input data-data-end-row type="number" min="1" step="1" placeholder="Hasta el final"></label>
               <label class="field column-block-field hidden" data-column-block-field><span>Tabla dentro de la hoja</span><select data-column-block></select></label>
-              <label class="field"><span>Fecha desde <small>dd/mm/aaaa · opcional</small></span><input data-date-from data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
-              <label class="field"><span>Fecha hasta <small>dd/mm/aaaa · opcional</small></span><input data-date-to data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
+              <label class="field"><span>Fecha desde <small>dd/mm/aaaa o dd/mm/aa · opcional</small></span><input data-date-from data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
+              <label class="field"><span>Fecha hasta <small>dd/mm/aaaa o dd/mm/aa · opcional</small></span><input data-date-to data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
               <label class="field import-option-wide"><span>Omitir descripciones exactas <small>separadas por coma</small></span><input data-excluded-descriptions type="text" placeholder="Ej.: saldo inicial, totales"></label>
             </div>
             <div class="mapping-grid" data-mapping-grid></div>
@@ -286,8 +286,8 @@
       <div class="modal-header"><div><h2>Recortar pendientes por período</h2><p>Los movimientos fuera del rango dejarán de participar en la conciliación, pero no se borrarán.</p></div><button class="icon-button" data-close-period type="button" aria-label="Cerrar"><i data-lucide="x"></i></button></div>
       <div class="period-trim-body">
         <div class="config-grid period-trim-fields">
-          <label class="field"><span>Fecha desde <small>dd/mm/aaaa · inclusive</small></span><input name="from" data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
-          <label class="field"><span>Fecha hasta <small>dd/mm/aaaa · inclusive</small></span><input name="to" data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
+          <label class="field"><span>Fecha desde <small>dd/mm/aaaa o dd/mm/aa · inclusive</small></span><input name="from" data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
+          <label class="field"><span>Fecha hasta <small>dd/mm/aaaa o dd/mm/aa · inclusive</small></span><input name="to" data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
         </div>
         <div id="periodTrimPreview" class="retry-summary"></div>
         <div class="inline-warning period-trim-note"><i data-lucide="info"></i><span>El recorte se aplica sólo a movimientos sin conciliar. Los conciliados y posibles no se modifican. Si una propuesta se rechaza después, sus movimientos respetarán automáticamente este período.</span></div>

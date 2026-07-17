@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_BUILD = "2026.07.17-7";
+const APP_BUILD = "2026.07.17-8";
 const STATE_SCHEMA_VERSION = 1;
 const STATE_SHEET_NAME = "Estado ConciliApp";
 const STATE_CHUNK_SIZE = 30000;
@@ -175,7 +175,7 @@ function bindDateDisplayInputs() {
     input.addEventListener("blur", () => {
       const parsed = parseDisplayDateInput(input.value);
       if (parsed === null) {
-        input.setCustomValidity("Use el formato dd/mm/aaaa e indique una fecha válida.");
+        input.setCustomValidity("Use el formato dd/mm/aaaa o dd/mm/aa e indique una fecha válida.");
         return;
       }
       input.setCustomValidity("");
@@ -440,7 +440,7 @@ function bindSourceEditor(sourceKey) {
 function applySourceDateFilter(sourceKey, field, input) {
   const parsed = parseDisplayDateInput(input.value);
   if (parsed === null) {
-    input.setCustomValidity("Use el formato dd/mm/aaaa e indique una fecha válida.");
+    input.setCustomValidity("Use el formato dd/mm/aaaa o dd/mm/aa e indique una fecha válida.");
     input.reportValidity();
     return;
   }
@@ -1647,7 +1647,7 @@ function applyPeriodTrim(event) {
   event.preventDefault();
   const period = readPeriodTrimForm();
   if (period.invalid) {
-    showToast("Fecha no válida", "Use el formato dd/mm/aaaa e indique fechas existentes.", "error");
+    showToast("Fecha no válida", "Use el formato dd/mm/aaaa o dd/mm/aa e indique fechas existentes.", "error");
     return;
   }
   if (!period.from && !period.to) {
@@ -3889,6 +3889,7 @@ function createStateSnapshot() {
     schemaVersion: STATE_SCHEMA_VERSION,
     appBuild: APP_BUILD,
     savedAt: new Date().toISOString(),
+    exportFileName: document.getElementById("exportFileName")?.value.trim() || "",
     config: { ...state.config },
     sources: {
       system: serializeSource(state.sources.system),
@@ -4006,6 +4007,7 @@ function restoreStateSnapshot(snapshot) {
   renderSourceEditor("bank");
   renderConfigSummary();
   document.getElementById("reviewSearch").value = state.review.search;
+  document.getElementById("exportFileName").value = String(snapshot.exportFileName || "").replace(/\.xlsx$/i, "");
   const targetStep = state.results.processingAt || reconciliations.length
     ? 6
     : state.sources.system.isValid && state.sources.bank.isValid ? 4
@@ -4059,7 +4061,9 @@ async function loadPreviousReconciliationFile(file) {
     const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: false, dense: false });
     const snapshot = extractStateSnapshotFromWorkbook(workbook);
     restoreStateSnapshot(snapshot);
-    await persistSnapshot(snapshot);
+    const loadedFileName = normalizeExportFileName(file.name).replace(/\.xlsx$/i, "");
+    document.getElementById("exportFileName").value = loadedFileName;
+    await persistSnapshot(createStateSnapshot());
     showToast("Conciliación restaurada", "Se recuperaron los conciliados, posibles, pendientes y parámetros guardados.", "success", 7000);
   } catch (error) {
     console.error(error);
@@ -4501,11 +4505,16 @@ function formatDateInput(value) {
 function parseDisplayDateInput(value) {
   const text = String(value || "").trim();
   if (!text) return "";
-  const match = text.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (!match) return null;
-  const day = Number(match[1]);
-  const month = Number(match[2]);
-  const year = Number(match[3]);
+  const compact = text.match(/^\d{6}$|^\d{8}$/)
+    ? text
+    : text.match(/^\d{2}[\/\-.]\d{2}[\/\-.](?:\d{2}|\d{4})$/)
+      ? text.replace(/\D/g, "")
+      : "";
+  if (!compact) return null;
+  const day = Number(compact.slice(0, 2));
+  const month = Number(compact.slice(2, 4));
+  let year = Number(compact.slice(4));
+  if (compact.length === 6) year += year < 50 ? 2000 : 1900;
   const date = new Date(Date.UTC(year, month - 1, day));
   if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
   return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
