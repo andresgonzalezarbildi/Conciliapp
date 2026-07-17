@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_BUILD = "2026.07.17-2";
+const APP_BUILD = "2026.07.17-3";
 const STATE_SCHEMA_VERSION = 1;
 const STATE_SHEET_NAME = "Estado ConciliApp";
 const STATE_CHUNK_SIZE = 30000;
@@ -256,6 +256,7 @@ function bindGlobalEvents() {
     renderReviewContent();
   });
   document.getElementById("approveAllPossibleBtn").addEventListener("click", approveAllPossible);
+  document.getElementById("rejectAllPossibleBtn").addEventListener("click", rejectAllPossible);
   document.getElementById("retryPendingBtn").addEventListener("click", openRetryDialog);
   document.querySelectorAll("[data-close-retry]").forEach(button => button.addEventListener("click", () => dom.retryDialog.close()));
   dom.retryForm.addEventListener("submit", event => {
@@ -267,6 +268,8 @@ function bindGlobalEvents() {
   document.querySelectorAll("[data-close-detail]").forEach(button => button.addEventListener("click", () => dom.detailDialog.close()));
   document.querySelectorAll("[data-close-group]").forEach(button => button.addEventListener("click", () => dom.editGroupDialog.close()));
   document.getElementById("saveGroupBtn").addEventListener("click", saveEditedGroup);
+  document.getElementById("approveGroupBtn").addEventListener("click", approveEditedGroup);
+  document.getElementById("rejectGroupBtn").addEventListener("click", rejectEditedGroup);
   window.addEventListener("keydown", event => {
     if (event.key === "Escape") {
       if (dom.detailDialog.open) dom.detailDialog.close();
@@ -3013,6 +3016,7 @@ function syncReviewControls() {
   const typeLabelElement = document.getElementById("typeFilterLabel");
   const searchInput = document.getElementById("reviewSearch");
   const approveAllButton = document.getElementById("approveAllPossibleBtn");
+  const rejectAllButton = document.getElementById("rejectAllPossibleBtn");
   const retryPendingButton = document.getElementById("retryPendingBtn");
   const isPending = state.review.tab === "pending";
   const typeOptions = isPending
@@ -3030,6 +3034,8 @@ function syncReviewControls() {
   const filteredPossibleCount = state.review.tab === "possible" ? getFilteredReconciliations("possible").length : 0;
   approveAllButton.classList.toggle("hidden", state.review.tab !== "possible" || !filteredPossibleCount);
   approveAllButton.innerHTML = `<i data-lucide="check-check"></i> Aprobar filtrados (${filteredPossibleCount})`;
+  rejectAllButton.classList.toggle("hidden", state.review.tab !== "possible" || !filteredPossibleCount);
+  rejectAllButton.innerHTML = `<i data-lucide="x-circle"></i> Rechazar filtrados (${filteredPossibleCount})`;
   const pendingCount = getPendingMovements("system").length + getPendingMovements("bank").length;
   retryPendingButton.classList.toggle("hidden", !isPending || pendingCount < 2 || state.processing.running);
   retryPendingButton.innerHTML = `<i data-lucide="scan-search"></i> Búsqueda avanzada (${pendingCount})`;
@@ -3053,6 +3059,24 @@ function approveAllPossible() {
   });
   state.review.page = 1;
   showToast("Conciliaciones aprobadas", `${possible.length} propuestas filtradas pasaron a conciliados.`, "success");
+  renderReview();
+}
+
+function rejectAllPossible() {
+  const possible = getFilteredReconciliations("possible");
+  if (!possible.length) return;
+  dom.reviewContent.querySelectorAll("[data-observation]").forEach(input => {
+    const item = findReconciliation(input.dataset.observation);
+    if (item) item.observation = input.value.trim();
+  });
+  if (!window.confirm(`Se rechazarán ${possible.length} conciliaciones visibles según la búsqueda y el filtro actuales. Sus movimientos volverán a Pendientes. ¿Desea continuar?`)) return;
+  possible.forEach(item => {
+    rememberRejectedProposal(item, "Propuesta rechazada mediante acción masiva");
+    item.status = "rejected";
+    if (!item.observation) item.observation = "Rechazada mediante acción masiva";
+  });
+  state.review.page = 1;
+  showToast("Propuestas rechazadas", `${possible.length} propuestas filtradas volvieron a pendientes.`, "error");
   renderReview();
 }
 
@@ -3115,7 +3139,7 @@ function renderReconciliationRow(item, isPossible) {
   const observationControl = `<label class="observation-control"><span class="visually-hidden">Observación que se exporta</span><input class="observation-input" data-observation="${item.id}" value="${escapeAttribute(item.observation)}" placeholder="Observación (se exporta)" title="Esta observación se incluye en el Excel final"></label>`;
   const observationNote = item.observation ? `<span class="observation-note" title="${escapeAttribute(item.observation)}"><i data-lucide="message-square-text"></i> Observación</span>` : "";
   const actions = isPossible
-    ? `<div class="tabular-actions result-actions-possible">${observationControl}<button class="table-action approve" type="button" data-action="approve" data-id="${item.id}"><i data-lucide="check"></i>Aprobar</button><button class="table-action" type="button" data-action="edit" data-id="${item.id}" title="Cambiar las filas que integran esta propuesta"><i data-lucide="list-restart"></i>Cambiar</button><button class="table-action reject" type="button" data-action="reject" data-id="${item.id}"><i data-lucide="x"></i>Rechazar</button><button class="table-action" type="button" data-action="detail" data-id="${item.id}"><i data-lucide="info"></i>Motivo</button></div>`
+    ? `<div class="tabular-actions result-actions-possible">${observationControl}<button class="table-action approve" type="button" data-action="approve" data-id="${item.id}"><i data-lucide="check"></i>Aprobar</button><button class="table-action" type="button" data-action="review" data-id="${item.id}" title="Ver el motivo y cambiar los movimientos"><i data-lucide="list-checks"></i>Revisar</button><button class="table-action reject" type="button" data-action="reject" data-id="${item.id}"><i data-lucide="x"></i>Rechazar</button></div>`
     : `<div class="tabular-actions result-actions-confirmed">${observationNote}<button class="table-action" type="button" data-action="detail" data-id="${item.id}"><i data-lucide="eye"></i>Detalle</button><button class="table-action reject" type="button" data-action="unmatch" data-id="${item.id}"><i data-lucide="unlink"></i>Quitar</button></div>`;
   const retryLabel = item.dateAgnosticPass ? "Sin fecha" : item.automaticRelaxedPass ? "Flexible auto" : item.advancedRetry ? "Búsqueda avanzada" : item.relaxedPass ? "Reanálisis" : "";
   const manualApprovalLabel = item.manuallyApproved ? `<span class="manual-approval-badge">Aprobada manualmente</span>` : "";
@@ -3141,7 +3165,7 @@ function handleReconciliationAction(action, id) {
   const item = findReconciliation(id);
   if (!item) return;
   if (action === "detail") return openReconciliationDetail(item);
-  if (action === "edit") return openEditGroup(item);
+  if (action === "review" || action === "edit") return openEditGroup(item);
   if (action === "approve") {
     item.status = "confirmed";
     item.manuallyApproved = true;
@@ -3353,9 +3377,18 @@ function openEditGroup(item) {
   state.review.editSelectedBank = new Set(item.bankIds);
   state.review.editSearchSystem = "";
   state.review.editSearchBank = "";
+  document.getElementById("editGroupTitle").textContent = `Revisar ${item.id}`;
+  document.getElementById("editGroupSubtitle").textContent = `${typeLabel(item)} · ${item.criterion}`;
+  renderEditGroupReason(item);
   renderEditGroupContent();
   document.getElementById("editGroupObservation").value = item.observation || "";
   dom.editGroupDialog.showModal();
+}
+
+function renderEditGroupReason(item) {
+  const reasons = Array.isArray(item.reasons) ? item.reasons : [];
+  document.getElementById("editGroupReason").innerHTML = `<div class="proposal-review-overview"><div><span>Confianza</span><strong>${item.score}/100</strong></div><div><span>Diferencia</span><strong>${formatMoney(item.difference)}</strong></div><div><span>Estado</span><strong>${item.status === "confirmed" ? "Conciliado" : "Posible"}</strong></div></div><div class="reason-list"><h3>Por qué se propuso</h3><ul>${reasons.length ? reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join("") : "<li>La propuesta fue generada por los criterios de monto, fecha y descripción configurados.</li>"}${item.ambiguous ? "<li>Existen alternativas y requiere revisión manual.</li>" : ""}</ul></div>`;
+  refreshIcons(document.getElementById("editGroupReason"));
 }
 
 function getFilteredEditMovements(sourceKey) {
@@ -3383,9 +3416,7 @@ function renderEditGroupContent() {
     checkbox.addEventListener("change", () => {
       const selection = checkbox.dataset.source === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
       if (checkbox.checked) selection.add(checkbox.value); else selection.delete(checkbox.value);
-      checkbox.closest("tr")?.classList.toggle("selected", checkbox.checked);
-      checkbox.closest("tr")?.setAttribute("aria-selected", String(checkbox.checked));
-      updateEditGroupTotals();
+      renderEditGroupContent();
     });
   });
   container.querySelectorAll("[data-group-row]").forEach(row => {
@@ -3433,7 +3464,9 @@ function updateEditGroupTotals() {
   const bankFooter = document.getElementById("editSideTotals-bank");
   if (systemFooter) systemFooter.innerHTML = renderSelectedMovementTotals(systemMovements);
   if (bankFooter) bankFooter.innerHTML = renderSelectedMovementTotals(bankMovements);
-  document.getElementById("saveGroupBtn").disabled = !manualSelectionCanReconcile(systemMovements, bankMovements);
+  const selectionIsValid = manualSelectionCanReconcile(systemMovements, bankMovements);
+  document.getElementById("saveGroupBtn").disabled = !selectionIsValid;
+  document.getElementById("approveGroupBtn").disabled = !selectionIsValid;
 }
 
 function renderEditSideTotals(label, movements) {
@@ -3447,33 +3480,70 @@ function getEditGroupSelections() {
   return { system: new Set(state.review.editSelectedSystem), bank: new Set(state.review.editSelectedBank) };
 }
 
-function saveEditedGroup() {
+function commitEditedGroup(targetStatus) {
   const current = findReconciliation(state.review.editingId);
-  if (!current) return;
+  if (!current) return false;
   const selected = getEditGroupSelections();
   const systemMovements = movementsFromIds("system", selected.system);
   const bankMovements = movementsFromIds("bank", selected.bank);
-  if (!manualSelectionCanReconcile(systemMovements, bankMovements)) return;
-  const updated = systemMovements.length && bankMovements.length
-    ? calculateReconciliation(systemMovements, bankMovements)
-    : calculateInternalReconciliation(systemMovements.length ? systemMovements : bankMovements, systemMovements.length ? "system" : "bank");
+  if (!manualSelectionCanReconcile(systemMovements, bankMovements)) return false;
   const originalSignature = reconciliationSignature(current);
-  const updatedSignature = reconciliationSignature(updated);
-  if (originalSignature !== updatedSignature) rememberRejectedProposal(current, "Agrupación reemplazada al cambiar sus movimientos");
-  state.review.rejectedSignatures.delete(updatedSignature);
-  Object.assign(current, updated, {
-    id: current.id,
-    status: "possible",
-    observation: document.getElementById("editGroupObservation").value.trim() || current.observation,
-    ambiguous: false,
-    alternativeCount: 0,
-    criterion: "Agrupación editada manualmente; requiere aprobación",
-    manual: true
-  });
-  current.reasons.push("La agrupación original fue modificada manualmente");
+  const selectedSignature = reconciliationSignatureFromIds([...selected.system], [...selected.bank]);
+  const selectionChanged = originalSignature !== selectedSignature;
+  const observation = document.getElementById("editGroupObservation").value.trim();
+  if (selectionChanged) {
+    const updated = systemMovements.length && bankMovements.length
+      ? calculateReconciliation(systemMovements, bankMovements)
+      : calculateInternalReconciliation(systemMovements.length ? systemMovements : bankMovements, systemMovements.length ? "system" : "bank");
+    rememberRejectedProposal(current, "Agrupación reemplazada al cambiar sus movimientos");
+    state.review.rejectedSignatures.delete(reconciliationSignature(updated));
+    Object.assign(current, updated, {
+      id: current.id,
+      status: targetStatus,
+      observation,
+      ambiguous: false,
+      alternativeCount: 0,
+      criterion: targetStatus === "confirmed" ? "Agrupación editada y aprobada manualmente" : "Agrupación editada manualmente; requiere aprobación",
+      manual: true
+    });
+    current.reasons.push("La agrupación original fue modificada manualmente");
+  } else {
+    current.status = targetStatus;
+    current.observation = observation;
+  }
+  if (targetStatus === "confirmed") {
+    current.manuallyApproved = true;
+    current.manuallyApprovedAt = new Date();
+    current.ambiguous = false;
+    current.alternativeCount = 0;
+    if (!current.reasons.includes("La propuesta fue aprobada manualmente durante la revisión")) current.reasons.push("La propuesta fue aprobada manualmente durante la revisión");
+  }
   dom.editGroupDialog.close();
-  showToast("Agrupación actualizada", "Revise los nuevos totales y apruebe la propuesta.", "success");
   renderReview();
+  return true;
+}
+
+function saveEditedGroup() {
+  if (!commitEditedGroup("possible")) return;
+  showToast("Propuesta guardada", "Los movimientos, totales y la observación quedaron actualizados.", "success");
+}
+
+function approveEditedGroup() {
+  const current = findReconciliation(state.review.editingId);
+  if (!current || !commitEditedGroup("confirmed")) return;
+  showToast("Conciliación aprobada", `${current.id} pasó a conciliados.`, "success");
+}
+
+function rejectEditedGroup() {
+  const current = findReconciliation(state.review.editingId);
+  if (!current) return;
+  current.observation = document.getElementById("editGroupObservation").value.trim();
+  rememberRejectedProposal(current, "Propuesta rechazada desde la revisión detallada");
+  current.status = "rejected";
+  dom.editGroupDialog.close();
+  state.review.page = 1;
+  renderReview();
+  showToast("Propuesta rechazada", "Sus movimientos volvieron a la lista de pendientes.", "error");
 }
 
 function getEditGroupSelectionIds(sourceKey) {

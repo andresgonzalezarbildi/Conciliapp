@@ -6,11 +6,10 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta name="description" content="Herramienta local para conciliación de movimientos contables, de caja y banco.">
   <title>Conciliación contable</title>
-  <link rel="stylesheet" href="styles.css?v=20260717-2">
+  <link rel="stylesheet" href="styles.css?v=20260717-3">
   <script defer src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script defer src="app.js?v=20260717-2"></script>
-  <link rel="icon" href="favicon.png" type="image/png">
+  <script defer src="app.js?v=20260717-3"></script>
 </head>
 <body>
   <header class="app-header">
@@ -222,6 +221,7 @@
           <label class="field inline"><span>Orden</span><select id="sortResults"><option value="score-desc">Mayor confianza</option><option value="score-asc">Menor confianza</option><option value="date-desc">Fecha más reciente</option><option value="date-asc">Fecha más antigua</option><option value="difference-desc">Mayor diferencia</option></select></label>
           <button id="retryPendingBtn" class="button button-secondary button-small hidden" type="button" title="Configurar una búsqueda adicional sólo sobre los movimientos pendientes"><i data-lucide="scan-search"></i> Búsqueda avanzada</button>
           <button id="approveAllPossibleBtn" class="button button-secondary button-small hidden" type="button"><i data-lucide="check-check"></i> Aprobar filtrados</button>
+          <button id="rejectAllPossibleBtn" class="button button-danger button-small hidden" type="button"><i data-lucide="x-circle"></i> Rechazar filtrados</button>
         </div>
         <div id="reviewContent" class="review-content"></div>
         <div id="pagination" class="pagination"></div>
@@ -278,7 +278,7 @@
     </form>
   </dialog>
 
-  <dialog id="editGroupDialog" class="modal modal-wide"><div class="modal-card"><div class="modal-header"><div><h2>Cambiar movimientos de la propuesta</h2><p>Marque las filas que deben integrar cada lado; los totales se recalculan debajo.</p></div><button class="icon-button" data-close-group type="button" aria-label="Cerrar"><i data-lucide="x"></i></button></div><div id="editGroupContent" class="manual-grid"></div><div id="editGroupTotals" class="group-totals"></div><label class="field edit-group-observation"><span>Observación <small>se incluye en el Excel exportado</small></span><input id="editGroupObservation" type="text" placeholder="Motivo del ajuste o nota para revisión"></label><div class="modal-actions"><button class="button button-secondary" data-close-group type="button">Cancelar</button><button id="saveGroupBtn" class="button button-primary" type="button">Guardar propuesta</button></div></div></dialog>
+  <dialog id="editGroupDialog" class="modal modal-wide"><div class="modal-card"><div class="modal-header"><div><h2 id="editGroupTitle">Revisar propuesta</h2><p id="editGroupSubtitle">Consulte el motivo y ajuste los movimientos si es necesario.</p></div><button class="icon-button" data-close-group type="button" aria-label="Cerrar"><i data-lucide="x"></i></button></div><div id="editGroupReason" class="proposal-review-reason"></div><div id="editGroupContent" class="manual-grid"></div><div id="editGroupTotals" class="group-totals"></div><label class="field edit-group-observation"><span>Observación <small>se incluye en el Excel exportado</small></span><input id="editGroupObservation" type="text" placeholder="Motivo del ajuste o nota para revisión"></label><div class="modal-actions proposal-review-actions"><button class="button button-secondary" data-close-group type="button">Cancelar</button><button id="rejectGroupBtn" class="button button-danger" type="button"><i data-lucide="x"></i> Rechazar</button><button id="saveGroupBtn" class="button button-secondary" type="button"><i data-lucide="save"></i> Guardar propuesta</button><button id="approveGroupBtn" class="button button-primary" type="button"><i data-lucide="check"></i> Guardar y aprobar</button></div></div></dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 </body>
