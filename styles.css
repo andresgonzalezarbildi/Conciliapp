@@ -353,7 +353,7 @@ p { color: var(--muted); }
 .processing-card .button { margin: 26px auto 0; }
 
 .review-heading { margin-bottom: 18px; }
-.summary-cards { display: grid; grid-template-columns: repeat(7, minmax(130px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.summary-cards { display: grid; grid-template-columns: repeat(8, minmax(112px, 1fr)); gap: 10px; margin-bottom: 18px; }
 .summary-card { min-width: 0; padding: 13px 14px; background: white; border: 1px solid var(--line); border-radius: 6px; box-shadow: var(--shadow); }
 .summary-card span { display: block; overflow: hidden; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .035em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
 .summary-card strong { display: block; margin-top: 4px; font-size: 18px; font-variant-numeric: tabular-nums; }
@@ -471,6 +471,10 @@ p { color: var(--muted); }
 .export-stat { padding: 12px 14px; background: var(--surface-muted); border: 1px solid var(--line); border-radius: 5px; }
 .export-stat span { display: block; color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; }
 .export-stat strong { display: block; margin-top: 3px; font-size: 18px; }
+.export-file-name { max-width: 520px; margin: 0 auto 14px; text-align: left; }
+.export-file-name > div { display: grid; grid-template-columns: 1fr auto; align-items: center; overflow: hidden; background: white; border: 1px solid var(--line-strong); border-radius: 5px; }
+.export-file-name input { min-width: 0; border: 0; border-radius: 0; box-shadow: none !important; }
+.export-file-name > div > span { align-self: stretch; display: flex; align-items: center; padding: 0 12px; color: var(--muted); background: var(--surface-muted); border-left: 1px solid var(--line); font-size: 12px; font-weight: 650; }
 .local-reminder { justify-content: center; gap: 6px; margin: 16px 0 0 !important; font-size: 11px; }
 .local-reminder svg { width: 14px; height: 14px; color: var(--green); }
 .sheet-list { padding: 29px 27px; }
@@ -538,6 +542,10 @@ p { color: var(--muted); }
 .retry-summary strong { font-variant-numeric: tabular-nums; }
 .retry-options { gap: 12px; }
 .retry-warning { color: var(--blue); background: #edf5fa; border-color: #cbdfea; }
+.period-trim-body { padding: 20px 22px 4px; }
+.period-trim-fields { grid-template-columns: 1fr 1fr; margin-bottom: 14px; }
+.period-trim-note { color: var(--blue); background: #edf5fa; border-color: #cbdfea; }
+.period-trim-body .retry-summary small { color: var(--muted); }
 
 .toast-region { position: fixed; top: 66px; right: 10px; z-index: 100; display: grid; width: min(300px, calc(100vw - 20px)); gap: 6px; }
 .toast { display: flex; align-items: flex-start; gap: 7px; padding: 8px 10px; background: #23383b; color: white; border-radius: 5px; box-shadow: 0 5px 15px rgba(18, 31, 33, .18); animation: toast-in .18s ease-out; }

@@ -1,31 +1,40 @@
 # Conciliación contable
 
-Aplicación web para comparar movimientos de un sistema contable con una planilla de caja o banco. Funciona directamente en el navegador con HTML, CSS, JavaScript y SheetJS, sin backend ni base de datos.
+Aplicación web para comparar movimientos de un sistema contable con una planilla de caja o banco. Funciona directamente en el navegador con HTML, CSS, JavaScript y SheetJS, sin backend ni base de datos externa.
 
 ![Vista de revisión de la conciliación](conciliacion-contable.png)
 
 ## Qué permite hacer
 
 - Cargar archivos XLSX, XLS y CSV sin recortarlos previamente.
+- Mostrar y solicitar todas las fechas de filtro con el formato `dd/mm/aaaa`, independientemente del idioma del navegador.
 - Elegir la hoja, el rango de filas, la tabla interna y las columnas que se deben utilizar.
 - Interpretar importes con signo o columnas separadas de Débito y Crédito, incluso cuando ambas columnas traen valores positivos.
 - Elegir la dirección contable: Débito positivo y Crédito negativo, la convención inversa o conservar el signo escrito.
 - Buscar coincidencias uno a uno, uno a varios, varios a uno y agrupaciones masivas exactas con importes de signos mixtos.
 - Detectar y crear compensaciones internas cuando Débitos y Créditos de una misma tabla dejan un neto de cero.
 - Interpretar automáticamente un extracto Débito/Crédito y un mayor Debe/Haber con la orientación de signos correspondiente.
-- Priorizar monto y fecha exactos cuando la pareja es única, aunque la descripción use otro nombre comercial.
+- Dar mayor peso a la descripción/proveedor sin impedir que monto y fecha compatibles lleguen a Posibles cuando el texto es distinto.
 - Evitar la penalización por tamaño en agrupaciones que comparten claramente el mismo nombre o referencia comercial.
 - Configurar tolerancias de fecha e importe, signos y similitud de descripciones.
-- Revisar, quitar, editar o crear conciliaciones manualmente.
+- Revisar el motivo y editar una propuesta desde una misma ventana, con acciones para guardarla, aprobarla o rechazarla.
+- Aprobar o rechazar en bloque únicamente las posibles conciliaciones alcanzadas por la búsqueda y los filtros actuales.
+- Ver primero los movimientos ya seleccionados al editar una propuesta, seguir sus totales en vivo y quitar integrantes directamente desde su detalle.
 - Consultar resultados en tablas compactas que se reorganizan para evitar desplazamiento horizontal en pantallas medianas.
 - Ejecutar automáticamente una segunda pasada moderadamente flexible sobre los pendientes.
 - Abrir una búsqueda avanzada para ajustar fechas, montos y similitud, incluyendo propuestas uno a uno sin límite de fecha.
-- Recordar durante la sesión las agrupaciones rechazadas para no volver a proponerlas.
+- Recortar los pendientes por una fecha inicial, final o ambas sin borrar movimientos ni modificar conciliaciones ya reservadas; el recorte se puede restaurar y queda documentado en el Excel.
+- Recordar las agrupaciones rechazadas para no volver a proponerlas al reanalizar pendientes o restaurar el progreso.
+- Conservar parámetros, observaciones y conciliaciones al volver atrás; una nueva ejecución analiza sólo los pendientes. Se reinician al comenzar otra conciliación o cargar un archivo diferente.
 - Agregar observaciones visibles que se incluyen en el Excel exportado.
+- Exportar los importes en columnas separadas de Débito y Crédito.
+- Elegir el nombre del archivo XLSX antes de descargarlo.
+- Reabrir un XLSX exportado para continuar con sus conciliados, posibles y pendientes sin volver a mapear las tablas.
+- Guardar automáticamente el progreso en IndexedDB y recuperarlo al actualizar o reabrir la página en el mismo navegador.
 - Procesar tablas grandes mediante índices, límites de búsqueda y Web Worker cuando el navegador lo admite.
 - Exportar un archivo Excel con resumen, conciliaciones, pendientes, datos originales y errores de importación.
 
-Los archivos se procesan en memoria y sus movimientos no se envían a un servidor ni se guardan en `localStorage`.
+Los movimientos no se envían a ningún servidor. El progreso se conserva localmente mediante IndexedDB y se elimina desde **Nueva conciliación**.
 
 ## Puesta en marcha
 

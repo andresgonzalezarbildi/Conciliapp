@@ -6,11 +6,11 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta name="description" content="Herramienta local para conciliación de movimientos contables, de caja y banco.">
   <title>Conciliación contable</title>
-  <link rel="stylesheet" href="styles.css?v=20260717-5">  
   <link rel="icon" href="favicon.png" type="image/png">
+  <link rel="stylesheet" href="styles.css?v=20260717-7">
   <script defer src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script defer src="app.js?v=20260717-5"></script>
+  <script defer src="app.js?v=20260717-7"></script>
 </head>
 <body>
   <header class="app-header">
@@ -101,8 +101,8 @@
               <label class="field"><span>Primera fila de datos</span><input data-data-start-row type="number" min="1" step="1"></label>
               <label class="field"><span>Última fila <small>opcional</small></span><input data-data-end-row type="number" min="1" step="1" placeholder="Hasta el final"></label>
               <label class="field column-block-field hidden" data-column-block-field><span>Tabla dentro de la hoja</span><select data-column-block></select></label>
-              <label class="field"><span>Fecha desde <small>opcional</small></span><input data-date-from type="date"></label>
-              <label class="field"><span>Fecha hasta <small>opcional</small></span><input data-date-to type="date"></label>
+              <label class="field"><span>Fecha desde <small>dd/mm/aaaa · opcional</small></span><input data-date-from data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
+              <label class="field"><span>Fecha hasta <small>dd/mm/aaaa · opcional</small></span><input data-date-to data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
               <label class="field import-option-wide"><span>Omitir descripciones exactas <small>separadas por coma</small></span><input data-excluded-descriptions type="text" placeholder="Ej.: saldo inicial, totales"></label>
             </div>
             <div class="mapping-grid" data-mapping-grid></div>
@@ -141,8 +141,8 @@
               <label class="field"><span>Primera fila de datos</span><input data-data-start-row type="number" min="1" step="1"></label>
               <label class="field"><span>Última fila <small>opcional</small></span><input data-data-end-row type="number" min="1" step="1" placeholder="Hasta el final"></label>
               <label class="field column-block-field hidden" data-column-block-field><span>Tabla dentro de la hoja</span><select data-column-block></select></label>
-              <label class="field"><span>Fecha desde <small>opcional</small></span><input data-date-from type="date"></label>
-              <label class="field"><span>Fecha hasta <small>opcional</small></span><input data-date-to type="date"></label>
+              <label class="field"><span>Fecha desde <small>dd/mm/aaaa · opcional</small></span><input data-date-from data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
+              <label class="field"><span>Fecha hasta <small>dd/mm/aaaa · opcional</small></span><input data-date-to data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
               <label class="field import-option-wide"><span>Omitir descripciones exactas <small>separadas por coma</small></span><input data-excluded-descriptions type="text" placeholder="Ej.: saldo inicial, totales"></label>
             </div>
             <div class="mapping-grid" data-mapping-grid></div>
@@ -221,6 +221,7 @@
           <label class="field inline"><span id="typeFilterLabel">Tipo de conciliación</span><select id="typeFilter"><option value="all">Todos</option><option value="one-to-one">Uno a uno</option><option value="one-to-many">Uno a varios</option><option value="many-to-one">Varios a uno</option><option value="manual">Manual</option></select></label>
           <label class="field inline"><span>Orden</span><select id="sortResults"><option value="score-desc">Mayor confianza</option><option value="score-asc">Menor confianza</option><option value="date-desc">Fecha más reciente</option><option value="date-asc">Fecha más antigua</option><option value="difference-desc">Mayor diferencia</option></select></label>
           <button id="retryPendingBtn" class="button button-secondary button-small hidden" type="button" title="Configurar una búsqueda adicional sólo sobre los movimientos pendientes"><i data-lucide="scan-search"></i> Búsqueda avanzada</button>
+          <button id="trimPeriodBtn" class="button button-secondary button-small hidden" type="button" title="Excluir temporalmente pendientes fuera de un rango de fechas"><i data-lucide="calendar-range"></i> Recortar período</button>
           <button id="approveAllPossibleBtn" class="button button-secondary button-small hidden" type="button"><i data-lucide="check-check"></i> Aprobar filtrados</button>
           <button id="rejectAllPossibleBtn" class="button button-danger button-small hidden" type="button"><i data-lucide="x-circle"></i> Rechazar filtrados</button>
         </div>
@@ -232,12 +233,13 @@
       <section class="step-panel" data-panel="7">
         <div class="export-layout">
           <div class="export-main">
-            <span class="export-icon"><i data-lucide="file-spreadsheet"></i></span><span class="step-kicker">Paso 7 de 7</span><h1>Exportar conciliación</h1><p>El libro incluirá el resumen, importes separados en Débito y Crédito, los casos confirmados y posibles, los pendientes y los datos originales. También podrá volver a cargarlo para continuar más adelante.</p>
+            <span class="export-icon"><i data-lucide="file-spreadsheet"></i></span><span class="step-kicker">Paso 7 de 7</span><h1>Exportar conciliación</h1><p>El libro incluirá el resumen, importes separados en Débito y Crédito, los casos confirmados y posibles, los pendientes, los excluidos por período y los datos originales. También podrá volver a cargarlo para continuar más adelante.</p>
             <div id="exportSummary" class="export-summary"></div>
+            <label class="field export-file-name"><span>Nombre del archivo</span><div><input id="exportFileName" type="text" maxlength="120" placeholder="conciliacion_aaaa-mm-dd"><span>.xlsx</span></div></label>
             <button id="downloadExcelBtn" class="button button-primary button-large" type="button"><i data-lucide="download"></i> Descargar resultado en Excel</button>
             <p class="local-reminder"><i data-lucide="shield-check"></i> El archivo se genera localmente en este navegador.</p>
           </div>
-          <aside class="sheet-list"><h2>Hojas incluidas</h2><ol><li>Resumen</li><li>Conciliaciones</li><li>Posibles conciliaciones</li><li>Pendientes del sistema</li><li>Pendientes de caja o banco</li><li>Datos originales del sistema</li><li>Datos originales de caja o banco</li><li>Errores de importación, si existen</li></ol></aside>
+          <aside class="sheet-list"><h2>Hojas incluidas</h2><ol><li>Resumen</li><li>Conciliaciones</li><li>Posibles conciliaciones</li><li>Pendientes del sistema</li><li>Pendientes de caja o banco</li><li>Excluidos por período, si existen</li><li>Datos originales del sistema</li><li>Datos originales de caja o banco</li><li>Errores de importación, si existen</li></ol></aside>
         </div>
         <div class="step-actions"><button class="button button-secondary" data-go-step="6" type="button"><i data-lucide="arrow-left"></i> Volver a revisión</button><button id="finishNewBtn" class="button button-quiet" type="button"><i data-lucide="rotate-ccw"></i> Iniciar otra conciliación</button></div>
       </section>
@@ -276,6 +278,21 @@
         <div class="inline-warning retry-warning"><i data-lucide="info"></i><span>Las propuestas que ya rechazó se recuerdan durante esta conciliación y no volverán a mostrarse con la misma agrupación.</span></div>
       </div>
       <div class="modal-actions"><button class="button button-secondary" data-close-retry type="button">Cancelar</button><button class="button button-primary" type="submit"><i data-lucide="scan-search"></i> Buscar en pendientes</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="periodTrimDialog" class="modal">
+    <form id="periodTrimForm" class="modal-card">
+      <div class="modal-header"><div><h2>Recortar pendientes por período</h2><p>Los movimientos fuera del rango dejarán de participar en la conciliación, pero no se borrarán.</p></div><button class="icon-button" data-close-period type="button" aria-label="Cerrar"><i data-lucide="x"></i></button></div>
+      <div class="period-trim-body">
+        <div class="config-grid period-trim-fields">
+          <label class="field"><span>Fecha desde <small>dd/mm/aaaa · inclusive</small></span><input name="from" data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
+          <label class="field"><span>Fecha hasta <small>dd/mm/aaaa · inclusive</small></span><input name="to" data-date-display type="text" inputmode="numeric" maxlength="10" placeholder="dd/mm/aaaa" autocomplete="off"></label>
+        </div>
+        <div id="periodTrimPreview" class="retry-summary"></div>
+        <div class="inline-warning period-trim-note"><i data-lucide="info"></i><span>El recorte se aplica sólo a movimientos sin conciliar. Los conciliados y posibles no se modifican. Si una propuesta se rechaza después, sus movimientos respetarán automáticamente este período.</span></div>
+      </div>
+      <div class="modal-actions"><button class="button button-secondary" data-close-period type="button">Cancelar</button><button id="restorePeriodBtn" class="button button-danger" type="button"><i data-lucide="rotate-ccw"></i> Restaurar excluidos</button><button class="button button-primary" type="submit"><i data-lucide="calendar-check"></i> Aplicar período</button></div>
     </form>
   </dialog>
 

@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_BUILD = "2026.07.17-5";
+const APP_BUILD = "2026.07.17-7";
 const STATE_SCHEMA_VERSION = 1;
 const STATE_SHEET_NAME = "Estado ConciliApp";
 const STATE_CHUNK_SIZE = 30000;
@@ -81,7 +81,8 @@ const state = {
     editSearchSystem: "",
     editSearchBank: "",
     rejectedSignatures: new Set(),
-    rejectedProposals: []
+    rejectedProposals: [],
+    periodFilter: { from: "", to: "", appliedAt: null }
   },
   persistence: { restoring: false, saveTimer: null, saveErrorShown: false, lastSavedAt: null }
 };
@@ -151,6 +152,7 @@ document.addEventListener("DOMContentLoaded", initializeApplication);
 async function initializeApplication() {
   console.info(`ConciliApp ${APP_BUILD}`);
   cacheDom();
+  bindDateDisplayInputs();
   bindGlobalEvents();
   bindSourceEditor("system");
   bindSourceEditor("bank");
@@ -161,6 +163,25 @@ async function initializeApplication() {
     showToast("No se pudo cargar el componente de Excel", "Verifique la conexión a Internet y vuelva a abrir el archivo.", "error", 9000);
   }
   await restorePersistedStateOnStartup();
+}
+
+function bindDateDisplayInputs() {
+  document.querySelectorAll("[data-date-display]").forEach(input => {
+    input.addEventListener("input", () => {
+      const digits = input.value.replace(/\D/g, "").slice(0, 8);
+      input.value = [digits.slice(0, 2), digits.slice(2, 4), digits.slice(4, 8)].filter(Boolean).join("/");
+      input.setCustomValidity("");
+    });
+    input.addEventListener("blur", () => {
+      const parsed = parseDisplayDateInput(input.value);
+      if (parsed === null) {
+        input.setCustomValidity("Use el formato dd/mm/aaaa e indique una fecha válida.");
+        return;
+      }
+      input.setCustomValidity("");
+      if (parsed) input.value = formatDateInput(parsed);
+    });
+  });
 }
 
 function cacheDom() {
@@ -179,6 +200,8 @@ function cacheDom() {
   dom.editGroupDialog = document.getElementById("editGroupDialog");
   dom.retryDialog = document.getElementById("retryDialog");
   dom.retryForm = document.getElementById("retryForm");
+  dom.periodTrimDialog = document.getElementById("periodTrimDialog");
+  dom.periodTrimForm = document.getElementById("periodTrimForm");
   dom.toastRegion = document.getElementById("toastRegion");
   dom.continueButtons = {
     system: document.getElementById("continueSystemBtn"),
@@ -258,13 +281,18 @@ function bindGlobalEvents() {
   document.getElementById("approveAllPossibleBtn").addEventListener("click", approveAllPossible);
   document.getElementById("rejectAllPossibleBtn").addEventListener("click", rejectAllPossible);
   document.getElementById("retryPendingBtn").addEventListener("click", openRetryDialog);
+  document.getElementById("trimPeriodBtn").addEventListener("click", openPeriodTrimDialog);
   document.querySelectorAll("[data-close-retry]").forEach(button => button.addEventListener("click", () => dom.retryDialog.close()));
+  document.querySelectorAll("[data-close-period]").forEach(button => button.addEventListener("click", () => dom.periodTrimDialog.close()));
   dom.retryForm.addEventListener("submit", event => {
     event.preventDefault();
     const options = readRetryOptions();
     dom.retryDialog.close();
     retryPendingReconciliation(options);
   });
+  dom.periodTrimForm.addEventListener("input", updatePeriodTrimPreview);
+  dom.periodTrimForm.addEventListener("submit", applyPeriodTrim);
+  document.getElementById("restorePeriodBtn").addEventListener("click", restorePeriodExclusions);
   document.querySelectorAll("[data-close-detail]").forEach(button => button.addEventListener("click", () => dom.detailDialog.close()));
   document.querySelectorAll("[data-close-group]").forEach(button => button.addEventListener("click", () => dom.editGroupDialog.close()));
   document.getElementById("saveGroupBtn").addEventListener("click", saveEditedGroup);
@@ -275,6 +303,7 @@ function bindGlobalEvents() {
       if (dom.detailDialog.open) dom.detailDialog.close();
       if (dom.editGroupDialog.open) dom.editGroupDialog.close();
       if (dom.retryDialog.open) dom.retryDialog.close();
+      if (dom.periodTrimDialog.open) dom.periodTrimDialog.close();
     }
   });
   document.addEventListener("visibilitychange", () => {
@@ -402,10 +431,25 @@ function bindSourceEditor(sourceKey) {
     autoMapColumns(source);
     renderSourceEditor(sourceKey);
   });
-  refs.dateFrom.addEventListener("change", event => { source.dateFrom = event.target.value; validateSource(sourceKey); renderImportDetectionNote(source, refs.detectionNote); });
-  refs.dateTo.addEventListener("change", event => { source.dateTo = event.target.value; validateSource(sourceKey); renderImportDetectionNote(source, refs.detectionNote); });
+  refs.dateFrom.addEventListener("change", event => applySourceDateFilter(sourceKey, "dateFrom", event.target));
+  refs.dateTo.addEventListener("change", event => applySourceDateFilter(sourceKey, "dateTo", event.target));
   refs.excludedDescriptions.addEventListener("change", event => { source.excludedDescriptions = event.target.value.trim(); validateSource(sourceKey); });
   toggleFormatOptions(editor, source);
+}
+
+function applySourceDateFilter(sourceKey, field, input) {
+  const parsed = parseDisplayDateInput(input.value);
+  if (parsed === null) {
+    input.setCustomValidity("Use el formato dd/mm/aaaa e indique una fecha válida.");
+    input.reportValidity();
+    return;
+  }
+  input.setCustomValidity("");
+  if (parsed) input.value = formatDateInput(parsed);
+  const source = state.sources[sourceKey];
+  source[field] = parsed;
+  validateSource(sourceKey);
+  renderImportDetectionNote(source, document.querySelector(`[data-source-editor="${sourceKey}"]`)._refs.detectionNote);
 }
 
 function toggleFormatOptions(editor, source) {
@@ -757,8 +801,8 @@ function renderSourceEditor(sourceKey) {
   refs.headerRow.value = source.headerRowNumber;
   refs.dataStartRow.value = source.dataStartRow;
   refs.dataEndRow.value = source.dataEndRow;
-  refs.dateFrom.value = source.dateFrom;
-  refs.dateTo.value = source.dateTo;
+  refs.dateFrom.value = formatDateInput(source.dateFrom);
+  refs.dateTo.value = formatDateInput(source.dateTo);
   refs.excludedDescriptions.value = source.excludedDescriptions;
   refs.columnBlockField.classList.toggle("hidden", source.detectedBlocks.length < 2);
   refs.columnBlock.innerHTML = source.detectedBlocks.length >= 2
@@ -1339,7 +1383,8 @@ function resetApplication() {
     editAvailableSystem: [], editAvailableBank: [],
     editSelectedSystem: new Set(), editSelectedBank: new Set(),
     editSearchSystem: "", editSearchBank: "",
-    rejectedSignatures: new Set(), rejectedProposals: []
+    rejectedSignatures: new Set(), rejectedProposals: [],
+    periodFilter: { from: "", to: "", appliedAt: null }
   };
   state.persistence.lastSavedAt = null;
   updateLocalSaveStatus("Sin progreso guardado");
@@ -1363,6 +1408,7 @@ function resetApplication() {
   dom.continueButtons.system.disabled = true;
   dom.continueButtons.bank.disabled = true;
   document.getElementById("reviewSearch").value = "";
+  document.getElementById("exportFileName").value = "";
   document.getElementById("typeFilter").value = "all";
   document.getElementById("sortResults").value = "score-desc";
   syncReviewControls();
@@ -1395,6 +1441,7 @@ function clearReconciliationResultsForSourceChange() {
   state.review.editSelectedBank.clear();
   state.review.editSearchSystem = "";
   state.review.editSearchBank = "";
+  state.review.periodFilter = { from: "", to: "", appliedAt: null };
   clearRejectedProposals();
   const search = document.getElementById("reviewSearch");
   if (search) search.value = "";
@@ -1543,6 +1590,91 @@ function cancelProcessing() {
     showToast("Procesamiento cancelado", "No se conservaron resultados parciales.", "error");
     goToStep(4);
   }
+}
+
+function openPeriodTrimDialog() {
+  if (state.processing.running) return;
+  const period = state.review.periodFilter || { from: "", to: "" };
+  dom.periodTrimForm.elements.namedItem("from").value = formatDateInput(period.from);
+  dom.periodTrimForm.elements.namedItem("to").value = formatDateInput(period.to);
+  document.getElementById("restorePeriodBtn").disabled = !period.from && !period.to;
+  updatePeriodTrimPreview();
+  dom.periodTrimDialog.showModal();
+  refreshIcons(dom.periodTrimDialog);
+}
+
+function readPeriodTrimForm() {
+  const rawFrom = String(dom.periodTrimForm.elements.namedItem("from").value || "").trim();
+  const rawTo = String(dom.periodTrimForm.elements.namedItem("to").value || "").trim();
+  const from = parseDisplayDateInput(rawFrom);
+  const to = parseDisplayDateInput(rawTo);
+  return {
+    from: from || "",
+    to: to || "",
+    invalid: Boolean((rawFrom && from === null) || (rawTo && to === null))
+  };
+}
+
+function periodTrimCounts(period) {
+  const system = getUnreservedMovements("system");
+  const bank = getUnreservedMovements("bank");
+  const excludedSystem = system.filter(item => movementIsOutsidePeriod(item, period)).length;
+  const excludedBank = bank.filter(item => movementIsOutsidePeriod(item, period)).length;
+  return {
+    system: system.length,
+    bank: bank.length,
+    excludedSystem,
+    excludedBank,
+    excluded: excludedSystem + excludedBank,
+    active: system.length + bank.length - excludedSystem - excludedBank
+  };
+}
+
+function updatePeriodTrimPreview() {
+  const period = readPeriodTrimForm();
+  if (period.invalid) {
+    document.getElementById("periodTrimPreview").innerHTML = `<strong>Fecha incompleta o no válida</strong><br><small>Utilice siempre el formato dd/mm/aaaa.</small>`;
+    return;
+  }
+  const counts = periodTrimCounts(period);
+  const range = period.from || period.to
+    ? `${period.from ? `desde ${formatDateInput(period.from)}` : "sin fecha inicial"} · ${period.to ? `hasta ${formatDateInput(period.to)}` : "sin fecha final"}`
+    : "todavía no se indicó un período";
+  document.getElementById("periodTrimPreview").innerHTML = `<strong>${counts.active.toLocaleString("es-UY")}</strong> movimientos sin conciliar quedarían activos · <strong>${counts.excluded.toLocaleString("es-UY")}</strong> excluidos (${counts.excludedSystem.toLocaleString("es-UY")} del sistema y ${counts.excludedBank.toLocaleString("es-UY")} de caja/banco)<br><small>${escapeHtml(range)}</small>`;
+}
+
+function applyPeriodTrim(event) {
+  event.preventDefault();
+  const period = readPeriodTrimForm();
+  if (period.invalid) {
+    showToast("Fecha no válida", "Use el formato dd/mm/aaaa e indique fechas existentes.", "error");
+    return;
+  }
+  if (!period.from && !period.to) {
+    showToast("Indique un período", "Complete al menos la fecha inicial o la fecha final.", "error");
+    return;
+  }
+  if (period.from && period.to && period.from > period.to) {
+    showToast("Período no válido", "La fecha inicial no puede ser posterior a la fecha final.", "error");
+    return;
+  }
+  const counts = periodTrimCounts(period);
+  state.review.periodFilter = { from: period.from, to: period.to, appliedAt: new Date() };
+  state.review.selectedSystem.clear();
+  state.review.selectedBank.clear();
+  state.review.page = 1;
+  dom.periodTrimDialog.close();
+  renderReview();
+  showToast("Período aplicado", `${counts.excluded.toLocaleString("es-UY")} movimientos quedaron excluidos sin ser eliminados.`, "success", 7000);
+}
+
+function restorePeriodExclusions() {
+  const excluded = getExcludedMovements("system").length + getExcludedMovements("bank").length;
+  state.review.periodFilter = { from: "", to: "", appliedAt: null };
+  state.review.page = 1;
+  dom.periodTrimDialog.close();
+  renderReview();
+  showToast("Período restaurado", `${excluded.toLocaleString("es-UY")} movimientos volvieron a Pendientes.`, "success");
 }
 
 function openRetryDialog() {
@@ -2972,14 +3104,32 @@ function getConfirmedIds() {
   return { system, bank };
 }
 
-function getPendingMovements(sourceKey) {
+function getUnreservedMovements(sourceKey) {
   const reserved = getReservedIds()[sourceKey];
   return state.sources[sourceKey].movements.filter(item => !reserved.has(item.id));
 }
 
+function movementIsOutsidePeriod(movement, period = state.review.periodFilter) {
+  const from = String(period?.from || "");
+  const to = String(period?.to || "");
+  if (!from && !to) return false;
+  const dateKey = movement.dateKey || toDateKey(movement.date);
+  return Boolean((from && dateKey < from) || (to && dateKey > to));
+}
+
+function getExcludedMovements(sourceKey) {
+  return getUnreservedMovements(sourceKey).filter(item => movementIsOutsidePeriod(item));
+}
+
+function getPendingMovements(sourceKey) {
+  return getUnreservedMovements(sourceKey).filter(item => !movementIsOutsidePeriod(item));
+}
+
 function calculateSummary() {
-  const totalSystem = state.sources.system.movements.length;
-  const totalBank = state.sources.bank.movements.length;
+  const excludedSystem = getExcludedMovements("system");
+  const excludedBank = getExcludedMovements("bank");
+  const totalSystem = state.sources.system.movements.length - excludedSystem.length;
+  const totalBank = state.sources.bank.movements.length - excludedBank.length;
   const total = totalSystem + totalBank;
   const confirmedIds = getConfirmedIds();
   const reservedIds = getReservedIds();
@@ -3002,6 +3152,9 @@ function calculateSummary() {
     pendingCount,
     pendingSystem,
     pendingBank,
+    excludedSystem,
+    excludedBank,
+    excludedCount: excludedSystem.length + excludedBank.length,
     reconciledAmount: roundMoney(reconciledAmount),
     pendingDifference,
     percentage: total ? confirmedCount / total * 100 : 0,
@@ -3018,6 +3171,7 @@ function syncReviewControls() {
   const approveAllButton = document.getElementById("approveAllPossibleBtn");
   const rejectAllButton = document.getElementById("rejectAllPossibleBtn");
   const retryPendingButton = document.getElementById("retryPendingBtn");
+  const trimPeriodButton = document.getElementById("trimPeriodBtn");
   const isPending = state.review.tab === "pending";
   const typeOptions = isPending
     ? [["all", "Débitos y créditos"], ["debit", "Sólo débitos"], ["credit", "Sólo créditos"]]
@@ -3037,8 +3191,11 @@ function syncReviewControls() {
   rejectAllButton.classList.toggle("hidden", state.review.tab !== "possible" || !filteredPossibleCount);
   rejectAllButton.innerHTML = `<i data-lucide="x-circle"></i> Rechazar filtrados (${filteredPossibleCount})`;
   const pendingCount = getPendingMovements("system").length + getPendingMovements("bank").length;
+  const excludedCount = getExcludedMovements("system").length + getExcludedMovements("bank").length;
   retryPendingButton.classList.toggle("hidden", !isPending || pendingCount < 2 || state.processing.running);
   retryPendingButton.innerHTML = `<i data-lucide="scan-search"></i> Búsqueda avanzada (${pendingCount})`;
+  trimPeriodButton.classList.toggle("hidden", !isPending || state.processing.running);
+  trimPeriodButton.innerHTML = `<i data-lucide="calendar-range"></i> ${excludedCount ? `Período · ${excludedCount} excluidos` : "Recortar período"}`;
 }
 
 function approveAllPossible() {
@@ -3084,10 +3241,11 @@ function renderReview() {
   syncReviewControls();
   const summary = calculateSummary();
   const cards = [
-    ["Movimientos", summary.total.toLocaleString("es-UY"), ""],
+    ["Movimientos activos", summary.total.toLocaleString("es-UY"), ""],
     ["Conciliados", summary.confirmedCount.toLocaleString("es-UY"), "success"],
     ["Posibles", summary.possibleCount.toLocaleString("es-UY"), "warning"],
     ["Pendientes", summary.pendingCount.toLocaleString("es-UY"), "danger"],
+    ["Excluidos", summary.excludedCount.toLocaleString("es-UY"), summary.excludedCount ? "warning" : ""],
     ["Importe conciliado", formatMoney(summary.reconciledAmount), "success"],
     ["Diferencia pendiente", formatMoney(summary.pendingDifference), summary.pendingDifference ? "danger" : "success"],
     ["Avance", `${formatDecimal(summary.percentage, 1)}%`, "success"]
@@ -3371,8 +3529,10 @@ function openEditGroup(item) {
     other.systemIds.forEach(id => reservedByOthers.system.add(id));
     other.bankIds.forEach(id => reservedByOthers.bank.add(id));
   });
-  state.review.editAvailableSystem = state.sources.system.movements.filter(movement => !reservedByOthers.system.has(movement.id));
-  state.review.editAvailableBank = state.sources.bank.movements.filter(movement => !reservedByOthers.bank.has(movement.id));
+  const currentSystemIds = new Set(item.systemIds);
+  const currentBankIds = new Set(item.bankIds);
+  state.review.editAvailableSystem = state.sources.system.movements.filter(movement => !reservedByOthers.system.has(movement.id) && (currentSystemIds.has(movement.id) || !movementIsOutsidePeriod(movement)));
+  state.review.editAvailableBank = state.sources.bank.movements.filter(movement => !reservedByOthers.bank.has(movement.id) && (currentBankIds.has(movement.id) || !movementIsOutsidePeriod(movement)));
   state.review.editSelectedSystem = new Set(item.systemIds);
   state.review.editSelectedBank = new Set(item.bankIds);
   state.review.editSearchSystem = "";
@@ -3745,6 +3905,10 @@ function createStateSnapshot() {
       search: state.review.search,
       type: state.review.type,
       sort: state.review.sort,
+      periodFilter: {
+        ...state.review.periodFilter,
+        appliedAt: state.review.periodFilter?.appliedAt instanceof Date ? state.review.periodFilter.appliedAt.toISOString() : state.review.periodFilter?.appliedAt
+      },
       rejectedSignatures: [...state.review.rejectedSignatures],
       rejectedProposals: state.review.rejectedProposals.map(item => ({ ...item, at: item.at instanceof Date ? item.at.toISOString() : item.at }))
     }
@@ -3829,6 +3993,11 @@ function restoreStateSnapshot(snapshot) {
     editSelectedBank: new Set(),
     editSearchSystem: "",
     editSearchBank: "",
+    periodFilter: {
+      from: String(savedReview.periodFilter?.from || ""),
+      to: String(savedReview.periodFilter?.to || ""),
+      appliedAt: reviveStoredDate(savedReview.periodFilter?.appliedAt)
+    },
     rejectedSignatures: new Set(savedReview.rejectedSignatures || []),
     rejectedProposals: (savedReview.rejectedProposals || []).map(item => ({ ...item, at: reviveStoredDate(item.at) }))
   };
@@ -4009,10 +4178,13 @@ function renderExportSummary() {
     ["Conciliaciones", summary.confirmedReconciliations],
     ["Posibles", summary.possibleReconciliations],
     ["Pendientes", summary.pendingCount],
+    ["Excluidos por período", summary.excludedCount],
     ["Importe conciliado", formatMoney(summary.reconciledAmount)],
     ["Diferencia pendiente", formatMoney(summary.pendingDifference)],
     ["Porcentaje conciliado", `${formatDecimal(summary.percentage, 1)}%`]
   ].map(([label, value]) => `<div class="export-stat"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join("");
+  const fileNameInput = document.getElementById("exportFileName");
+  if (!fileNameInput.value.trim()) fileNameInput.value = `conciliacion_${toFileTimestamp()}`;
 }
 
 function exportWorkbook() {
@@ -4037,8 +4209,10 @@ function exportWorkbook() {
       ["Fecha y hora de procesamiento", formatDateTime(processingDate)],
       ["Tabla del sistema", state.sources.system.name || state.sources.system.label],
       ["Tabla de caja o banco", state.sources.bank.name || state.sources.bank.label],
-      ["Movimientos del sistema", summary.totalSystem],
-      ["Movimientos de caja o banco", summary.totalBank],
+      ["Movimientos activos del sistema", summary.totalSystem],
+      ["Movimientos activos de caja o banco", summary.totalBank],
+      ["Movimientos excluidos por período", summary.excludedCount],
+      ["Período activo", state.review.periodFilter?.from || state.review.periodFilter?.to ? `${state.review.periodFilter.from ? `Desde ${formatDateInput(state.review.periodFilter.from)}` : "Sin fecha inicial"} · ${state.review.periodFilter.to ? `Hasta ${formatDateInput(state.review.periodFilter.to)}` : "Sin fecha final"}` : "Sin recorte"],
       ["Movimientos conciliados", summary.confirmedCount],
       ["Movimientos en posibles conciliaciones", summary.possibleCount],
       ["Movimientos pendientes", summary.pendingCount],
@@ -4091,6 +4265,18 @@ function exportWorkbook() {
     const pendingBankSheet = createStyledDataSheet(pendingHeaders, summary.pendingBank.map(pendingExportRow), { fill: "FBEEEE", numericColumns: [3, 4] });
     appendSheet(workbook, pendingBankSheet, "Pendientes de caja o banco");
 
+    if (summary.excludedCount) {
+      const excludedHeaders = ["Origen", ...pendingHeaders, "Motivo", "Período aplicado"];
+      const periodLabel = state.review.periodFilter?.from || state.review.periodFilter?.to
+        ? `${state.review.periodFilter.from ? `Desde ${formatDateInput(state.review.periodFilter.from)}` : "Sin fecha inicial"} · ${state.review.periodFilter.to ? `Hasta ${formatDateInput(state.review.periodFilter.to)}` : "Sin fecha final"}`
+        : "";
+      const excludedRows = [
+        ...summary.excludedSystem.map(item => excludedPeriodExportRow("Sistema contable", item, periodLabel)),
+        ...summary.excludedBank.map(item => excludedPeriodExportRow("Caja o banco", item, periodLabel))
+      ];
+      appendSheet(workbook, createStyledDataSheet(excludedHeaders, excludedRows, { fill: "F3F0EB", numericColumns: [4, 5] }), "Excluidos por período");
+    }
+
     appendSheet(workbook, createOriginalDataSheet(state.sources.system), "Datos originales del sistema");
     appendSheet(workbook, createOriginalDataSheet(state.sources.bank), "Datos originales caja o banco");
 
@@ -4103,9 +4289,12 @@ function exportWorkbook() {
     appendSheet(workbook, createApplicationStateSheet(snapshot), STATE_SHEET_NAME);
     hideWorkbookSheet(workbook, STATE_SHEET_NAME);
     const output = XLSX.write(workbook, { compression: true, bookType: "xlsx", type: "array", cellStyles: true });
+    const exportFileNameInput = document.getElementById("exportFileName");
+    const exportFileName = normalizeExportFileName(exportFileNameInput.value);
+    exportFileNameInput.value = exportFileName.replace(/\.xlsx$/i, "");
     downloadBlob(
       new Blob([output], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
-      `conciliacion_${toFileTimestamp()}.xlsx`
+      exportFileName
     );
     showToast("Excel generado", "El libro de conciliación se descargó correctamente.", "success");
     scheduleStatePersistence();
@@ -4143,6 +4332,10 @@ function reconciliationExportRow(item) {
 function pendingExportRow(item) {
   const amounts = movementDebitCredit(item);
   return [item.row, formatDate(item.date), item.description, amounts.debit, amounts.credit, movementTypeLabel(item.type), item.status];
+}
+
+function excludedPeriodExportRow(sourceLabel, item, periodLabel) {
+  return [sourceLabel, ...pendingExportRow(item), "Fuera del período activo; no participa en búsquedas ni pendientes", periodLabel];
 }
 
 function movementDebitCredit(movement) {
@@ -4276,6 +4469,12 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function normalizeExportFileName(value) {
+  let name = String(value || "").trim().replace(/\.xlsx$/i, "");
+  name = name.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-").replace(/[. ]+$/g, "").trim().slice(0, 120);
+  return `${name || `conciliacion_${toFileTimestamp()}`}.xlsx`;
+}
+
 function displayOriginalValue(value) {
   if (value instanceof Date) return formatDate(value);
   return String(value ?? "");
@@ -4297,6 +4496,19 @@ function formatDate(date) {
 function formatDateInput(value) {
   const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
   return match ? `${match[3]}/${match[2]}/${match[1]}` : String(value || "");
+}
+
+function parseDisplayDateInput(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const match = text.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!match) return null;
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
 function formatDateTime(date) {
