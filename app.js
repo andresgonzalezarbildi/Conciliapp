@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_BUILD = "2026.07.17-3";
+const APP_BUILD = "2026.07.17-5";
 const STATE_SCHEMA_VERSION = 1;
 const STATE_SHEET_NAME = "Estado ConciliApp";
 const STATE_CHUNK_SIZE = 30000;
@@ -3416,7 +3416,9 @@ function renderEditGroupContent() {
     checkbox.addEventListener("change", () => {
       const selection = checkbox.dataset.source === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
       if (checkbox.checked) selection.add(checkbox.value); else selection.delete(checkbox.value);
-      renderEditGroupContent();
+      checkbox.closest("tr")?.classList.toggle("selected", checkbox.checked);
+      checkbox.closest("tr")?.setAttribute("aria-selected", String(checkbox.checked));
+      updateEditGroupTotals();
     });
   });
   container.querySelectorAll("[data-group-row]").forEach(row => {
@@ -3432,15 +3434,28 @@ function renderEditGroupContent() {
     const sourceKey = button.dataset.editSelectFiltered;
     const selection = sourceKey === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
     getFilteredEditMovements(sourceKey).forEach(item => selection.add(item.id));
-    renderEditGroupContent();
+    syncEditSelectionDom(sourceKey);
+    updateEditGroupTotals();
   }));
   container.querySelectorAll("[data-edit-clear]").forEach(button => button.addEventListener("click", () => {
-    const selection = button.dataset.editClear === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
+    const sourceKey = button.dataset.editClear;
+    const selection = sourceKey === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
     selection.clear();
-    renderEditGroupContent();
+    syncEditSelectionDom(sourceKey);
+    updateEditGroupTotals();
   }));
   updateEditGroupTotals();
   refreshIcons(container);
+}
+
+function syncEditSelectionDom(sourceKey) {
+  const selection = sourceKey === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
+  document.querySelectorAll(`[data-group-select][data-source="${sourceKey}"]`).forEach(checkbox => {
+    const selected = selection.has(checkbox.value);
+    checkbox.checked = selected;
+    checkbox.closest("tr")?.classList.toggle("selected", selected);
+    checkbox.closest("tr")?.setAttribute("aria-selected", String(selected));
+  });
 }
 
 function renderEditSide(sourceKey) {
@@ -3449,7 +3464,7 @@ function renderEditSide(sourceKey) {
   const selected = sourceKey === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
   const selectedMovements = movementsFromIds(sourceKey, selected);
   const search = sourceKey === "system" ? state.review.editSearchSystem : state.review.editSearchBank;
-  return `<section class="pending-side edit-pending-side"><h3>${label}<span>${movements.length} visibles</span></h3><div class="edit-side-tools"><label class="search-field"><i data-lucide="search"></i><input data-edit-search="${sourceKey}" type="search" value="${escapeAttribute(search)}" placeholder="Filtrar este lado"></label><div><button class="table-action" data-edit-select-filtered="${sourceKey}" type="button"><i data-lucide="list-checks"></i> Seleccionar filtrados</button><button class="table-action" data-edit-clear="${sourceKey}" type="button">Limpiar</button></div></div><div class="table-scroll"><table class="data-table pending-table"><colgroup><col class="pending-col-check"><col class="pending-col-row"><col class="pending-col-date"><col class="pending-col-description"><col class="pending-col-type"><col class="pending-col-amount"></colgroup><thead><tr><th></th><th>Fila</th><th>Fecha</th><th>Descripción</th><th>Tipo</th><th class="amount">Monto</th></tr></thead><tbody>${movements.length ? movements.map(item => `<tr data-group-row tabindex="0" aria-selected="${selected.has(item.id)}" class="${selected.has(item.id) ? "selected" : ""}"><td><input data-group-select data-source="${sourceKey}" type="checkbox" value="${item.id}" ${selected.has(item.id) ? "checked" : ""}></td><td>${item.row}</td><td>${formatDate(item.date)}</td><td class="pending-description" title="${escapeAttribute(item.description)}">${escapeHtml(item.description)}</td><td><span class="type-badge">${movementTypeLabel(item.type)}</span></td><td class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</td></tr>`).join("") : `<tr><td colspan="6">No hay movimientos para este filtro.</td></tr>`}</tbody></table></div><div class="pending-total pending-selected-total edit-selected-total" id="editSideTotals-${sourceKey}">${renderSelectedMovementTotals(selectedMovements)}</div></section>`;
+  return `<section class="pending-side edit-pending-side"><h3>${label}<span>${movements.length} visibles</span></h3><div class="edit-side-tools"><label class="search-field"><i data-lucide="search"></i><input data-edit-search="${sourceKey}" type="search" value="${escapeAttribute(search)}" placeholder="Filtrar este lado"></label><div><button class="table-action" data-edit-select-filtered="${sourceKey}" type="button"><i data-lucide="list-checks"></i> Seleccionar filtrados</button><button class="table-action" data-edit-clear="${sourceKey}" type="button">Limpiar</button></div></div><div class="table-scroll" data-edit-scroll="${sourceKey}"><table class="data-table pending-table"><colgroup><col class="pending-col-check"><col class="pending-col-row"><col class="pending-col-date"><col class="pending-col-description"><col class="pending-col-type"><col class="pending-col-amount"></colgroup><thead><tr><th></th><th>Fila</th><th>Fecha</th><th>Descripción</th><th>Tipo</th><th class="amount">Monto</th></tr></thead><tbody>${movements.length ? movements.map(item => `<tr data-group-row tabindex="0" aria-selected="${selected.has(item.id)}" class="${selected.has(item.id) ? "selected" : ""}"><td><input data-group-select data-source="${sourceKey}" type="checkbox" value="${item.id}" ${selected.has(item.id) ? "checked" : ""}></td><td>${item.row}</td><td>${formatDate(item.date)}</td><td class="pending-description" title="${escapeAttribute(item.description)}">${escapeHtml(item.description)}</td><td><span class="type-badge">${movementTypeLabel(item.type)}</span></td><td class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</td></tr>`).join("") : `<tr><td colspan="6">No hay movimientos para este filtro.</td></tr>`}</tbody></table></div><div class="pending-total pending-selected-total edit-selected-total" id="editSideTotals-${sourceKey}">${renderSelectedMovementTotals(selectedMovements)}</div></section>`;
 }
 
 function updateEditGroupTotals() {
