@@ -1,6 +1,13 @@
 "use strict";
 
-const APP_BUILD = "2026.07.16-2";
+const APP_BUILD = "2026.07.17-2";
+const STATE_SCHEMA_VERSION = 1;
+const STATE_SHEET_NAME = "Estado ConciliApp";
+const STATE_CHUNK_SIZE = 30000;
+const LOCAL_DATABASE_NAME = "ConciliAppLocal";
+const LOCAL_DATABASE_VERSION = 1;
+const LOCAL_STATE_STORE = "reconciliations";
+const LOCAL_STATE_KEY = "current";
 
 const DEFAULT_CONFIG = Object.freeze({
   dateTolerance: 1,
@@ -75,7 +82,8 @@ const state = {
     editSearchBank: "",
     rejectedSignatures: new Set(),
     rejectedProposals: []
-  }
+  },
+  persistence: { restoring: false, saveTimer: null, saveErrorShown: false, lastSavedAt: null }
 };
 
 function createEmptySource(key, label) {
@@ -114,7 +122,9 @@ function createEmptySource(key, label) {
     invalidRows: [],
     validationErrors: [],
     validationWarnings: [],
-    isValid: false
+    isValid: false,
+    restoredState: false,
+    restoredRowCount: 0
   };
 }
 
@@ -138,7 +148,7 @@ const dom = {};
 
 document.addEventListener("DOMContentLoaded", initializeApplication);
 
-function initializeApplication() {
+async function initializeApplication() {
   console.info(`ConciliApp ${APP_BUILD}`);
   cacheDom();
   bindGlobalEvents();
@@ -150,6 +160,7 @@ function initializeApplication() {
   if (typeof XLSX === "undefined") {
     showToast("No se pudo cargar el componente de Excel", "Verifique la conexión a Internet y vuelva a abrir el archivo.", "error", 9000);
   }
+  await restorePersistedStateOnStartup();
 }
 
 function cacheDom() {
@@ -177,6 +188,12 @@ function cacheDom() {
 
 function bindGlobalEvents() {
   document.getElementById("startBtn").addEventListener("click", () => goToStep(2));
+  document.getElementById("resumeReconciliationBtn").addEventListener("click", () => document.getElementById("resumeReconciliationInput").click());
+  document.getElementById("resumeReconciliationInput").addEventListener("change", async event => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) await loadPreviousReconciliationFile(file);
+  });
   document.querySelectorAll("[data-go-step]").forEach(button => {
     button.addEventListener("click", () => goToStep(Number(button.dataset.goStep)));
   });
@@ -257,6 +274,9 @@ function bindGlobalEvents() {
       if (dom.retryDialog.open) dom.retryDialog.close();
     }
   });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden" && !state.persistence.restoring) persistCurrentState();
+  });
 }
 
 function refreshIcons(root = document) {
@@ -334,11 +354,12 @@ function bindSourceEditor(sourceKey) {
     const file = event.target.files[0];
     if (file) loadSourceFile(sourceKey, file);
   });
-  refs.nameInput.addEventListener("input", event => { source.name = event.target.value.trim(); });
+  refs.nameInput.addEventListener("input", event => { source.name = event.target.value.trim(); scheduleStatePersistence(900); });
   refs.formatMode.addEventListener("change", event => {
     source.formatMode = event.target.value;
     toggleFormatOptions(editor, source);
     if (source.workbook) { autoMapColumns(source); renderSourceEditor(sourceKey); }
+    else scheduleStatePersistence();
   });
   refs.positiveMeaning.addEventListener("change", event => { source.positiveMeaning = event.target.value; validateSource(sourceKey); });
   refs.splitConvention.addEventListener("change", event => {
@@ -438,11 +459,14 @@ async function loadSourceFile(sourceKey, file) {
       invalidRows: [],
       validationErrors: [],
       validationWarnings: [],
-      isValid: false
+      isValid: false,
+      restoredState: false,
+      restoredRowCount: 0
     });
     extractSelectedSheet(source);
     autoMapColumns(source);
     renderSourceEditor(sourceKey);
+    scheduleStatePersistence();
     showToast("Archivo cargado", `${file.name} se leyó correctamente.`, "success");
   } catch (error) {
     console.error(error);
@@ -722,7 +746,9 @@ function renderSourceEditor(sourceKey) {
   if (!source.file) return;
   refs.fileSummary.classList.remove("hidden");
   refs.importWorkspace.classList.remove("hidden");
-  refs.fileSummary.innerHTML = `<div><i data-lucide="file-spreadsheet"></i><span><strong>${escapeHtml(source.file.name)}</strong><small>${formatFileSize(source.file.size)} · ${source.rows.length.toLocaleString("es-UY")} filas detectadas</small></span></div><button class="button button-ghost button-small" type="button" data-replace-file><i data-lucide="replace"></i> Reemplazar</button>`;
+  const detectedRows = source.restoredRowCount || source.rows.length;
+  const restoredLabel = source.restoredState ? " · restaurado desde una conciliación guardada" : "";
+  refs.fileSummary.innerHTML = `<div><i data-lucide="file-spreadsheet"></i><span><strong>${escapeHtml(source.file.name)}</strong><small>${formatFileSize(source.file.size)} · ${detectedRows.toLocaleString("es-UY")} filas detectadas${restoredLabel}</small></span></div><button class="button button-ghost button-small" type="button" data-replace-file><i data-lucide="replace"></i> Reemplazar</button>`;
   refs.fileSummary.querySelector("[data-replace-file]").addEventListener("click", () => refs.fileInput.click());
   refs.sheetSelect.innerHTML = source.sheetNames.map(name => `<option value="${escapeAttribute(name)}"${name === source.selectedSheet ? " selected" : ""}>${escapeHtml(name)}</option>`).join("");
   refs.headerRow.value = source.headerRowNumber;
@@ -801,6 +827,15 @@ function displayPreviewValue(source, value, columnIndex) {
 
 function validateSource(sourceKey) {
   const source = state.sources[sourceKey];
+  if (source.restoredState && !source.workbook) {
+    source.isValid = source.movements.length > 0;
+    source.validationErrors = source.isValid ? [] : ["El estado guardado no contiene movimientos válidos."];
+    source.validationWarnings = source.isValid ? ["Datos restaurados. Para cambiar hoja o columnas, vuelva a cargar el archivo original."] : [];
+    renderValidation(source);
+    dom.continueButtons[sourceKey].disabled = !source.isValid;
+    scheduleStatePersistence();
+    return;
+  }
   const errors = [];
   const warnings = [];
   const invalidRows = [];
@@ -840,6 +875,7 @@ function validateSource(sourceKey) {
   source.isValid = errors.length === 0 && movements.length > 0;
   renderValidation(source);
   dom.continueButtons[sourceKey].disabled = !source.isValid;
+  scheduleStatePersistence();
 }
 
 function fieldsAreIncompatible(a, b) {
@@ -873,6 +909,8 @@ function normalizeSourceRow(source, row, effectiveFormat) {
   let signedAmount = null;
   let originalAmount = "";
   let movementType = "";
+  let debitAmount = 0;
+  let creditAmount = 0;
   if (effectiveFormat === "signed") {
     const rawAmount = valueAt(row, source.mapping.amount);
     const parsedAmount = parseAmount(rawAmount);
@@ -882,6 +920,8 @@ function normalizeSourceRow(source, row, effectiveFormat) {
     else {
       signedAmount = source.positiveMeaning === "debit" ? parsedAmount : -parsedAmount;
       movementType = signedAmount >= 0 ? "debit" : "credit";
+      debitAmount = movementType === "debit" ? Math.abs(signedAmount) : 0;
+      creditAmount = movementType === "credit" ? Math.abs(signedAmount) : 0;
     }
   } else {
     const rawDebit = valueAt(row, source.mapping.debit);
@@ -906,6 +946,8 @@ function normalizeSourceRow(source, row, effectiveFormat) {
       else if (source.splitConvention === "credit-positive") signedAmount = -Math.abs(debit || 0) + Math.abs(credit || 0);
       else signedAmount = source.splitConvention === "invert" ? -writtenAmount : writtenAmount;
       movementType = debitActive && !creditActive ? "debit" : !debitActive && creditActive ? "credit" : "mixed";
+      debitAmount = debitActive ? Math.abs(debit || 0) : 0;
+      creditAmount = creditActive ? Math.abs(credit || 0) : 0;
     }
   }
   const status = source.mapping.status === "" ? "" : String(valueAt(row, source.mapping.status) ?? "").trim();
@@ -923,6 +965,8 @@ function normalizeSourceRow(source, row, effectiveFormat) {
       description,
       originalDescription: rawDescription,
       amount: roundMoney(signedAmount),
+      debitAmount: roundMoney(debitAmount),
+      creditAmount: roundMoney(creditAmount),
       originalAmount,
       type: movementType,
       status,
@@ -1180,6 +1224,7 @@ function readConfigForm() {
     dom.configForm.elements.namedItem("possibleThreshold").value = state.config.possibleThreshold;
   }
   updateCostWarning();
+  scheduleStatePersistence();
 }
 
 function updateCostWarning() {
@@ -1272,6 +1317,9 @@ function renderConfigSummary() {
 }
 
 function resetApplication() {
+  clearPersistedState().catch(() => {});
+  if (state.persistence.saveTimer) window.clearTimeout(state.persistence.saveTimer);
+  state.persistence.saveTimer = null;
   state.step = 1;
   state.maxVisitedStep = 1;
   // Los controles del editor conservan referencias a estos objetos. Se limpian
@@ -1290,6 +1338,8 @@ function resetApplication() {
     editSearchSystem: "", editSearchBank: "",
     rejectedSignatures: new Set(), rejectedProposals: []
   };
+  state.persistence.lastSavedAt = null;
+  updateLocalSaveStatus("Sin progreso guardado");
   document.querySelectorAll("[data-source-editor]").forEach(editor => {
     editor.querySelector("[data-source-name]").value = "";
     editor.querySelector("[data-file-input]").value = "";
@@ -1320,7 +1370,7 @@ function resetApplication() {
 
 function confirmNewReconciliation() {
   const hasData = state.sources.system.file || state.sources.bank.file || state.results.processingAt;
-  if (!hasData || window.confirm("Se eliminarán de la memoria todos los archivos y resultados cargados. ¿Desea continuar?")) resetApplication();
+  if (!hasData || window.confirm("Se eliminarán los archivos, resultados y el progreso guardado en este navegador. ¿Desea continuar?")) resetApplication();
 }
 
 function clearReconciliationResultsForSourceChange() {
@@ -3025,6 +3075,7 @@ function renderReview() {
   document.querySelector('[data-tab-count="pending"]').textContent = summary.pendingCount;
   renderReviewContent();
   refreshIcons(document.querySelector(".review-toolbar"));
+  scheduleStatePersistence();
 }
 
 function renderReviewContent() {
@@ -3078,7 +3129,10 @@ function bindResultTableEvents() {
   dom.reviewContent.querySelectorAll("[data-observation]").forEach(input => {
     input.addEventListener("input", () => {
       const item = findReconciliation(input.dataset.observation);
-      if (item) item.observation = input.value.trim();
+      if (item) {
+        item.observation = input.value.trim();
+        scheduleStatePersistence(900);
+      }
     });
   });
 }
@@ -3235,6 +3289,7 @@ function renderReconciliationDetail(item) {
   content.innerHTML = `<div class="detail-grid">${renderDetailSide("Sistema contable", item.systemMovements, "system", item)}${renderDetailSide("Caja o banco", item.bankMovements, "bank", item)}<div class="detail-summary"><div><span>Total sistema</span><strong>${formatMoney(item.totalSystem)}</strong></div><div><span>Total caja/banco</span><strong>${formatMoney(item.totalBank)}</strong></div><div><span>Diferencia</span><strong>${formatMoney(item.difference)}</strong></div><div><span>Confianza</span><strong>${item.score}/100</strong></div><div><span>Estado</span><strong>${item.status === "confirmed" ? "Conciliado" : "Posible"}</strong></div></div><div class="reason-list"><h3>Por qué se propuso</h3><ul>${item.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join("")}${item.ambiguous ? "<li>La combinación es ambigua y requiere aprobación manual.</li>" : ""}</ul></div><label class="field detail-observation"><span>Observación <small>se incluye en el Excel exportado</small></span><textarea data-detail-observation placeholder="Agregar una nota para esta conciliación">${escapeHtml(item.observation)}</textarea></label></div>`;
   content.querySelector("[data-detail-observation]")?.addEventListener("input", event => {
     item.observation = event.target.value.trim();
+    scheduleStatePersistence(900);
   });
   content.querySelectorAll("[data-detail-remove]").forEach(button => button.addEventListener("click", () => {
     removeMovementFromReconciliationDetail(item, button.dataset.source, button.dataset.detailRemove);
@@ -3524,6 +3579,345 @@ function movementTypeLabel(type) {
   return type === "debit" ? "Débito" : type === "credit" ? "Crédito" : "Mixto";
 }
 
+function createStateSnapshot() {
+  const serializeMovement = movement => ({
+    id: movement.id,
+    source: movement.source,
+    row: movement.row,
+    date: movement.date instanceof Date ? movement.date.toISOString() : movement.date,
+    dateKey: movement.dateKey,
+    originalDate: movement.originalDate,
+    description: movement.description,
+    originalDescription: movement.originalDescription,
+    amount: movement.amount,
+    debitAmount: movementDebitCredit(movement).debit,
+    creditAmount: movementDebitCredit(movement).credit,
+    originalAmount: movement.originalAmount,
+    type: movement.type,
+    status: movement.status
+  });
+  const serializeSource = source => ({
+    key: source.key,
+    label: source.label,
+    name: source.name,
+    fileName: source.file?.name || source.fileName || `${source.label}.xlsx`,
+    fileSize: Number(source.file?.size) || 0,
+    selectedSheet: source.selectedSheet,
+    matrix: source.matrix,
+    headers: source.headers,
+    previewRows: source.rows.slice(0, 10),
+    restoredRowCount: source.restoredRowCount || source.rows.length || source.movements.length,
+    importRangeInfo: source.importRangeInfo,
+    headerRowIndex: source.headerRowIndex,
+    headerRowNumber: source.headerRowNumber,
+    dataStartRow: source.dataStartRow,
+    dataEndRow: source.dataEndRow,
+    detectedBlocks: source.detectedBlocks,
+    columnBlock: source.columnBlock,
+    dateFrom: source.dateFrom,
+    dateTo: source.dateTo,
+    reportPeriod: source.reportPeriod,
+    periodSource: source.periodSource,
+    excludedDescriptions: source.excludedDescriptions,
+    filteredRowsCount: source.filteredRowsCount,
+    formatMode: source.formatMode,
+    detectedFormat: source.detectedFormat,
+    positiveMeaning: source.positiveMeaning,
+    splitConvention: source.splitConvention,
+    splitConventionLocked: source.splitConventionLocked,
+    allowBoth: source.allowBoth,
+    mapping: { ...source.mapping },
+    movements: source.movements.map(serializeMovement),
+    invalidRows: source.invalidRows,
+    validationWarnings: source.validationWarnings
+  });
+  const reconciliations = state.results.reconciliations.map(item => {
+    const { systemMovements, bankMovements, ...serialized } = item;
+    return {
+      ...serialized,
+      createdAt: item.createdAt instanceof Date ? item.createdAt.toISOString() : item.createdAt,
+      approvedAt: item.approvedAt instanceof Date ? item.approvedAt.toISOString() : item.approvedAt,
+      manuallyApprovedAt: item.manuallyApprovedAt instanceof Date ? item.manuallyApprovedAt.toISOString() : item.manuallyApprovedAt
+    };
+  });
+  return {
+    schemaVersion: STATE_SCHEMA_VERSION,
+    appBuild: APP_BUILD,
+    savedAt: new Date().toISOString(),
+    config: { ...state.config },
+    sources: {
+      system: serializeSource(state.sources.system),
+      bank: serializeSource(state.sources.bank)
+    },
+    results: {
+      ...state.results,
+      processingAt: state.results.processingAt instanceof Date ? state.results.processingAt.toISOString() : state.results.processingAt,
+      retryPasses: (state.results.retryPasses || []).map(pass => ({ ...pass, at: pass.at instanceof Date ? pass.at.toISOString() : pass.at })),
+      reconciliations
+    },
+    review: {
+      tab: state.review.tab,
+      search: state.review.search,
+      type: state.review.type,
+      sort: state.review.sort,
+      rejectedSignatures: [...state.review.rejectedSignatures],
+      rejectedProposals: state.review.rejectedProposals.map(item => ({ ...item, at: item.at instanceof Date ? item.at.toISOString() : item.at }))
+    }
+  };
+}
+
+function snapshotHasProgress(snapshot) {
+  return Boolean(snapshot?.sources?.system?.movements?.length
+    || snapshot?.sources?.bank?.movements?.length
+    || snapshot?.results?.reconciliations?.length);
+}
+
+function reviveStoredDate(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function restoreStateSnapshot(snapshot) {
+  if (!snapshot || Number(snapshot.schemaVersion) !== STATE_SCHEMA_VERSION) throw new Error("La versión del estado guardado no es compatible con esta aplicación.");
+  if (!snapshotHasProgress(snapshot)) throw new Error("El archivo no contiene una conciliación guardada.");
+  state.persistence.restoring = true;
+  terminateProcessingWorker();
+  state.processing = { cancelled: false, running: false, worker: null, jobId: null };
+  state.config = { ...DEFAULT_CONFIG, ...(snapshot.config || {}) };
+  const restoreSource = (sourceKey, label) => {
+    const saved = snapshot.sources?.[sourceKey] || {};
+    const movements = (saved.movements || []).map(item => ({ ...item, date: reviveStoredDate(item.date) }));
+    const selectedSheet = saved.selectedSheet || "Datos restaurados";
+    Object.assign(state.sources[sourceKey], createEmptySource(sourceKey, label), saved, {
+      file: { name: saved.fileName || `${label}.xlsx`, size: Number(saved.fileSize) || 0 },
+      workbook: null,
+      sheetNames: [selectedSheet],
+      selectedSheet,
+      matrix: Array.isArray(saved.matrix) ? saved.matrix : [],
+      headers: Array.isArray(saved.headers) ? saved.headers : [],
+      rows: Array.isArray(saved.previewRows) ? saved.previewRows : [],
+      movements,
+      invalidRows: Array.isArray(saved.invalidRows) ? saved.invalidRows : [],
+      validationErrors: [],
+      validationWarnings: ["Datos restaurados. Para cambiar hoja o columnas, vuelva a cargar el archivo original."],
+      isValid: movements.length > 0,
+      restoredState: true,
+      restoredRowCount: Number(saved.restoredRowCount) || movements.length
+    });
+  };
+  restoreSource("system", "Sistema contable");
+  restoreSource("bank", "Caja o banco");
+  const systemById = new Map(state.sources.system.movements.map(item => [item.id, item]));
+  const bankById = new Map(state.sources.bank.movements.map(item => [item.id, item]));
+  const savedResults = snapshot.results || {};
+  const reconciliations = (savedResults.reconciliations || []).map(item => ({
+    ...item,
+    createdAt: reviveStoredDate(item.createdAt) || new Date(),
+    approvedAt: reviveStoredDate(item.approvedAt),
+    manuallyApprovedAt: reviveStoredDate(item.manuallyApprovedAt),
+    systemMovements: (item.systemIds || []).map(id => systemById.get(id)).filter(Boolean),
+    bankMovements: (item.bankIds || []).map(id => bankById.get(id)).filter(Boolean)
+  }));
+  state.results = {
+    ...createEmptyResults(),
+    ...savedResults,
+    processingAt: reviveStoredDate(savedResults.processingAt)
+      || (reconciliations.length ? reviveStoredDate(snapshot.savedAt) || new Date() : null),
+    retryPasses: (savedResults.retryPasses || []).map(pass => ({ ...pass, at: reviveStoredDate(pass.at) })),
+    reconciliations,
+    nextId: Math.max(Number(savedResults.nextId) || 1, reconciliations.length + 1)
+  };
+  const savedReview = snapshot.review || {};
+  state.review = {
+    tab: ["confirmed", "possible", "pending"].includes(savedReview.tab) ? savedReview.tab : "confirmed",
+    search: String(savedReview.search || ""),
+    type: String(savedReview.type || "all"),
+    sort: String(savedReview.sort || "score-desc"),
+    page: 1,
+    selectedSystem: new Set(),
+    selectedBank: new Set(),
+    editingId: null,
+    editAvailableSystem: [],
+    editAvailableBank: [],
+    editSelectedSystem: new Set(),
+    editSelectedBank: new Set(),
+    editSearchSystem: "",
+    editSearchBank: "",
+    rejectedSignatures: new Set(savedReview.rejectedSignatures || []),
+    rejectedProposals: (savedReview.rejectedProposals || []).map(item => ({ ...item, at: reviveStoredDate(item.at) }))
+  };
+  populateConfigForm();
+  renderSourceEditor("system");
+  renderSourceEditor("bank");
+  renderConfigSummary();
+  document.getElementById("reviewSearch").value = state.review.search;
+  const targetStep = state.results.processingAt || reconciliations.length
+    ? 6
+    : state.sources.system.isValid && state.sources.bank.isValid ? 4
+      : state.sources.system.isValid ? 3 : 2;
+  state.maxVisitedStep = Math.max(targetStep, targetStep === 6 ? 7 : targetStep);
+  if (targetStep === 6) renderReview();
+  goToStep(targetStep);
+  state.persistence.restoring = false;
+  state.persistence.lastSavedAt = reviveStoredDate(snapshot.savedAt) || new Date();
+  updateLocalSaveStatus("Progreso restaurado");
+}
+
+function createApplicationStateSheet(snapshot) {
+  const json = JSON.stringify(snapshot);
+  const rows = [["CONCILIAPP_STATE", STATE_SCHEMA_VERSION], ["Parte", "Contenido"]];
+  for (let offset = 0, part = 1; offset < json.length; offset += STATE_CHUNK_SIZE, part++) rows.push([part, json.slice(offset, offset + STATE_CHUNK_SIZE)]);
+  const worksheet = XLSX.utils.aoa_to_sheet(rows);
+  worksheet["!cols"] = [{ wch: 12 }, { wch: 80 }];
+  return worksheet;
+}
+
+function extractStateSnapshotFromWorkbook(workbook) {
+  const worksheet = workbook.Sheets?.[STATE_SHEET_NAME];
+  if (!worksheet) throw new Error("Este Excel no contiene el estado interno de una conciliación exportada por la aplicación.");
+  const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: true, defval: "" });
+  if (rows[0]?.[0] !== "CONCILIAPP_STATE") throw new Error("La hoja de estado no tiene un formato reconocido.");
+  const json = rows.slice(2).sort((left, right) => Number(left[0]) - Number(right[0])).map(row => String(row[1] || "")).join("");
+  return JSON.parse(json);
+}
+
+function hideWorkbookSheet(workbook, sheetName) {
+  const index = workbook.SheetNames.indexOf(sheetName);
+  if (index < 0) return;
+  workbook.Workbook ||= {};
+  workbook.Workbook.Sheets ||= [];
+  while (workbook.Workbook.Sheets.length < workbook.SheetNames.length) workbook.Workbook.Sheets.push({});
+  workbook.Workbook.Sheets[index] = { ...workbook.Workbook.Sheets[index], Hidden: 1 };
+}
+
+async function loadPreviousReconciliationFile(file) {
+  if (!/\.xlsx$/i.test(file.name || "")) {
+    showToast("Archivo no admitido", "Seleccione un XLSX exportado previamente por esta aplicación.", "error");
+    return;
+  }
+  if (typeof XLSX === "undefined") {
+    showToast("Lector de Excel no disponible", "Vuelva a abrir la aplicación con conexión a Internet.", "error");
+    return;
+  }
+  try {
+    updateLocalSaveStatus("Abriendo conciliación…");
+    const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: false, dense: false });
+    const snapshot = extractStateSnapshotFromWorkbook(workbook);
+    restoreStateSnapshot(snapshot);
+    await persistSnapshot(snapshot);
+    showToast("Conciliación restaurada", "Se recuperaron los conciliados, posibles, pendientes y parámetros guardados.", "success", 7000);
+  } catch (error) {
+    console.error(error);
+    state.persistence.restoring = false;
+    updateLocalSaveStatus("Guardado local automático");
+    showToast("No se pudo restaurar", error.message || "El archivo no es una conciliación compatible.", "error", 9000);
+  }
+}
+
+function openLocalStateDatabase() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) return reject(new Error("IndexedDB no está disponible."));
+    const request = window.indexedDB.open(LOCAL_DATABASE_NAME, LOCAL_DATABASE_VERSION);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(LOCAL_STATE_STORE)) request.result.createObjectStore(LOCAL_STATE_STORE);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("No se pudo abrir el almacenamiento local."));
+  });
+}
+
+async function persistSnapshot(snapshot) {
+  const database = await openLocalStateDatabase();
+  await new Promise((resolve, reject) => {
+    const transaction = database.transaction(LOCAL_STATE_STORE, "readwrite");
+    transaction.objectStore(LOCAL_STATE_STORE).put(snapshot, LOCAL_STATE_KEY);
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error || new Error("No se pudo guardar el progreso."));
+    transaction.onabort = () => reject(transaction.error || new Error("Se canceló el guardado local."));
+  });
+  database.close();
+}
+
+async function readPersistedSnapshot() {
+  const database = await openLocalStateDatabase();
+  const snapshot = await new Promise((resolve, reject) => {
+    const transaction = database.transaction(LOCAL_STATE_STORE, "readonly");
+    const request = transaction.objectStore(LOCAL_STATE_STORE).get(LOCAL_STATE_KEY);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error || new Error("No se pudo leer el progreso local."));
+  });
+  database.close();
+  return snapshot;
+}
+
+async function clearPersistedState() {
+  if (!window.indexedDB) return;
+  const database = await openLocalStateDatabase();
+  await new Promise((resolve, reject) => {
+    const transaction = database.transaction(LOCAL_STATE_STORE, "readwrite");
+    transaction.objectStore(LOCAL_STATE_STORE).delete(LOCAL_STATE_KEY);
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error || new Error("No se pudo borrar el progreso local."));
+  });
+  database.close();
+}
+
+function scheduleStatePersistence(delay = 650) {
+  if (state.persistence.restoring || !window.indexedDB) return;
+  if (state.persistence.saveTimer) window.clearTimeout(state.persistence.saveTimer);
+  updateLocalSaveStatus("Cambios pendientes…");
+  state.persistence.saveTimer = window.setTimeout(() => {
+    state.persistence.saveTimer = null;
+    persistCurrentState();
+  }, delay);
+}
+
+async function persistCurrentState() {
+  if (state.persistence.restoring || !window.indexedDB) return;
+  try {
+    const snapshot = createStateSnapshot();
+    if (!snapshotHasProgress(snapshot)) {
+      await clearPersistedState();
+      updateLocalSaveStatus("Sin progreso guardado");
+      return;
+    }
+    await persistSnapshot(snapshot);
+    state.persistence.lastSavedAt = new Date();
+    state.persistence.saveErrorShown = false;
+    updateLocalSaveStatus("Progreso guardado localmente");
+  } catch (error) {
+    console.error(error);
+    updateLocalSaveStatus("No se pudo guardar");
+    if (!state.persistence.saveErrorShown) {
+      state.persistence.saveErrorShown = true;
+      showToast("Guardado local no disponible", "El progreso sigue abierto, pero este navegador no permitió guardarlo automáticamente.", "error", 8000);
+    }
+  }
+}
+
+async function restorePersistedStateOnStartup() {
+  if (!window.indexedDB) {
+    updateLocalSaveStatus("Guardado local no disponible");
+    return;
+  }
+  try {
+    const snapshot = await readPersistedSnapshot();
+    if (!snapshotHasProgress(snapshot)) return;
+    restoreStateSnapshot(snapshot);
+    showToast("Progreso recuperado", "La conciliación se restauró automáticamente después de recargar la página.", "success", 7000);
+  } catch (error) {
+    console.error(error);
+    state.persistence.restoring = false;
+    updateLocalSaveStatus("No se pudo restaurar");
+  }
+}
+
+function updateLocalSaveStatus(message) {
+  const element = document.getElementById("localSaveStatus");
+  if (element) element.textContent = message;
+}
+
 function renderExportSummary() {
   const summary = calculateSummary();
   document.getElementById("exportSummary").innerHTML = [
@@ -3598,18 +3992,18 @@ function exportWorkbook() {
     styleSummarySheet(summarySheet);
     appendSheet(workbook, summarySheet, "Resumen");
 
-    const reconciliationHeaders = ["ID de conciliación", "Tipo", "Filas del sistema", "Filas de caja o banco", "Fechas del sistema", "Fechas de caja o banco", "Descripciones del sistema", "Descripciones de caja o banco", "Monto del sistema", "Monto de caja o banco", "Monto original caja o banco", "Diferencia", "Puntaje", "Estado", "Criterio", "Observaciones", "Fecha y hora de procesamiento"];
+    const reconciliationHeaders = ["ID de conciliación", "Tipo", "Filas del sistema", "Filas de caja o banco", "Fechas del sistema", "Fechas de caja o banco", "Descripciones del sistema", "Descripciones de caja o banco", "Débito del sistema", "Crédito del sistema", "Débito de caja o banco", "Crédito de caja o banco", "Diferencia", "Puntaje", "Estado", "Criterio", "Observaciones", "Fecha y hora de procesamiento"];
     const confirmed = state.results.reconciliations.filter(item => item.status === "confirmed");
     const possible = state.results.reconciliations.filter(item => item.status === "possible");
-    const reconciliationSheet = createStyledDataSheet(reconciliationHeaders, confirmed.map(reconciliationExportRow), { fill: "E9F5ED", numericColumns: [8, 9, 10, 11, 12] });
+    const reconciliationSheet = createStyledDataSheet(reconciliationHeaders, confirmed.map(reconciliationExportRow), { fill: "E9F5ED", numericColumns: [8, 9, 10, 11, 12], integerColumns: [13] });
     appendSheet(workbook, reconciliationSheet, "Conciliaciones");
-    const possibleSheet = createStyledDataSheet(reconciliationHeaders, possible.map(reconciliationExportRow), { fill: "FFF7DC", numericColumns: [8, 9, 10, 11, 12] });
+    const possibleSheet = createStyledDataSheet(reconciliationHeaders, possible.map(reconciliationExportRow), { fill: "FFF7DC", numericColumns: [8, 9, 10, 11, 12], integerColumns: [13] });
     appendSheet(workbook, possibleSheet, "Posibles conciliaciones");
 
-    const pendingHeaders = ["Fila original", "Fecha", "Descripción", "Monto firmado", "Tipo", "Estado original"];
-    const pendingSystemSheet = createStyledDataSheet(pendingHeaders, summary.pendingSystem.map(pendingExportRow), { fill: "FBEEEE", numericColumns: [3] });
+    const pendingHeaders = ["Fila original", "Fecha", "Descripción", "Débito", "Crédito", "Tipo", "Estado original"];
+    const pendingSystemSheet = createStyledDataSheet(pendingHeaders, summary.pendingSystem.map(pendingExportRow), { fill: "FBEEEE", numericColumns: [3, 4] });
     appendSheet(workbook, pendingSystemSheet, "Pendientes del sistema");
-    const pendingBankSheet = createStyledDataSheet(pendingHeaders, summary.pendingBank.map(pendingExportRow), { fill: "FBEEEE", numericColumns: [3] });
+    const pendingBankSheet = createStyledDataSheet(pendingHeaders, summary.pendingBank.map(pendingExportRow), { fill: "FBEEEE", numericColumns: [3, 4] });
     appendSheet(workbook, pendingBankSheet, "Pendientes de caja o banco");
 
     appendSheet(workbook, createOriginalDataSheet(state.sources.system), "Datos originales del sistema");
@@ -3620,12 +4014,16 @@ function exportWorkbook() {
       const errorRows = allErrors.map(item => [item.source, item.sheet, item.row, item.errors, item.values.map(displayOriginalValue).join(" | ")]);
       appendSheet(workbook, createStyledDataSheet(["Origen", "Hoja", "Fila", "Error", "Datos originales"], errorRows, { fill: "FBEEEE", numericColumns: [2] }), "Errores de importación");
     }
+    const snapshot = createStateSnapshot();
+    appendSheet(workbook, createApplicationStateSheet(snapshot), STATE_SHEET_NAME);
+    hideWorkbookSheet(workbook, STATE_SHEET_NAME);
     const output = XLSX.write(workbook, { compression: true, bookType: "xlsx", type: "array", cellStyles: true });
     downloadBlob(
       new Blob([output], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
       `conciliacion_${toFileTimestamp()}.xlsx`
     );
     showToast("Excel generado", "El libro de conciliación se descargó correctamente.", "success");
+    scheduleStatePersistence();
   } catch (error) {
     console.error(error);
     showToast("No se pudo generar el Excel", error.message || "Revise los datos y vuelva a intentarlo.", "error", 9000);
@@ -3633,6 +4031,8 @@ function exportWorkbook() {
 }
 
 function reconciliationExportRow(item) {
+  const systemTotals = debitCreditTotals(item.systemMovements);
+  const bankTotals = debitCreditTotals(item.bankMovements);
   return [
     item.id,
     typeLabel(item),
@@ -3642,9 +4042,10 @@ function reconciliationExportRow(item) {
     item.bankMovements.map(movement => formatDate(movement.date)).join(" | "),
     item.systemMovements.map(movement => movement.description).join(" | "),
     item.bankMovements.map(movement => movement.description).join(" | "),
-    item.totalSystem,
-    item.totalBank,
-    item.totalBankOriginal,
+    systemTotals.debit,
+    systemTotals.credit,
+    bankTotals.debit,
+    bankTotals.credit,
     item.difference,
     item.score,
     item.status === "confirmed" ? item.manuallyApproved ? "Conciliado · posible aprobada manualmente" : "Conciliado" : "Posible",
@@ -3655,7 +4056,27 @@ function reconciliationExportRow(item) {
 }
 
 function pendingExportRow(item) {
-  return [item.row, formatDate(item.date), item.description, item.amount, movementTypeLabel(item.type), item.status];
+  const amounts = movementDebitCredit(item);
+  return [item.row, formatDate(item.date), item.description, amounts.debit, amounts.credit, movementTypeLabel(item.type), item.status];
+}
+
+function movementDebitCredit(movement) {
+  const hasSeparatedAmounts = Number.isFinite(Number(movement.debitAmount)) && Number.isFinite(Number(movement.creditAmount));
+  if (hasSeparatedAmounts) return { debit: Math.abs(Number(movement.debitAmount) || 0), credit: Math.abs(Number(movement.creditAmount) || 0) };
+  if (movement.type === "debit") return { debit: Math.abs(Number(movement.amount) || 0), credit: 0 };
+  if (movement.type === "credit") return { debit: 0, credit: Math.abs(Number(movement.amount) || 0) };
+  return Number(movement.amount) >= 0
+    ? { debit: Math.abs(Number(movement.amount) || 0), credit: 0 }
+    : { debit: 0, credit: Math.abs(Number(movement.amount) || 0) };
+}
+
+function debitCreditTotals(movements) {
+  return movements.reduce((totals, movement) => {
+    const amounts = movementDebitCredit(movement);
+    totals.debit = roundMoney(totals.debit + amounts.debit);
+    totals.credit = roundMoney(totals.credit + amounts.credit);
+    return totals;
+  }, { debit: 0, credit: 0 });
 }
 
 function createOriginalDataSheet(source) {
@@ -3678,7 +4099,7 @@ function createStyledDataSheet(headers, rows, options = {}) {
   return worksheet;
 }
 
-function applyTableSheetStyle(worksheet, { fill = "FFFFFF", numericColumns = [] } = {}) {
+function applyTableSheetStyle(worksheet, { fill = "FFFFFF", numericColumns = [], integerColumns = [] } = {}) {
   const range = worksheet["!ref"] ? XLSX.utils.decode_range(worksheet["!ref"]) : { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
   const headerStyle = {
     fill: { fgColor: { rgb: "164E55" } },
@@ -3700,9 +4121,8 @@ function applyTableSheetStyle(worksheet, { fill = "FFFFFF", numericColumns = [] 
         alignment: { vertical: "top", wrapText: column === 4 || column === 5 || column === 6 || column === 7 },
         border: { bottom: { style: "hair", color: { rgb: "DDE3E4" } } }
       };
-      if (numericColumns.includes(column)) {
-        cell.z = column === 12 ? "0" : "#,##0.00;[Red]-#,##0.00";
-      }
+      if (integerColumns.includes(column)) cell.z = "0";
+      else if (numericColumns.includes(column)) cell.z = "#,##0.00;[Red]-#,##0.00";
     }
   }
   worksheet["!autofilter"] = { ref: XLSX.utils.encode_range({ r: 0, c: range.s.c }, { r: range.e.r, c: range.e.c }) };
@@ -3900,7 +4320,20 @@ window.ReconciliationApp = Object.freeze({
   retryPendingReconciliation,
   cancelProcessing,
   loadSourceFile,
+  loadPreviousReconciliationFile,
   renderReview,
   normalizeSourceRow,
+  movementDebitCredit,
+  debitCreditTotals,
+  reconciliationExportRow,
+  pendingExportRow,
+  createStateSnapshot,
+  restoreStateSnapshot,
+  createApplicationStateSheet,
+  extractStateSnapshotFromWorkbook,
+  persistSnapshot,
+  readPersistedSnapshot,
+  clearPersistedState,
+  exportWorkbook,
   getState: () => state
 });

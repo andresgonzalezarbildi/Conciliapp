@@ -6,10 +6,10 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta name="description" content="Herramienta local para conciliación de movimientos contables, de caja y banco.">
   <title>Conciliación contable</title>
-  <link rel="stylesheet" href="styles.css?v=20260716-2">
+  <link rel="stylesheet" href="styles.css?v=20260717-2">
   <script defer src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script defer src="app.js?v=20260716-2"></script>
+  <script defer src="app.js?v=20260717-2"></script>
 </head>
 <body>
   <header class="app-header">
@@ -22,7 +22,7 @@
     </div>
     <div class="header-actions">
       <a class="hub-link" href="https://andresgonzalez.netlify.app/" title="Volver al inicio" aria-label="Volver al hub inicial"><i data-lucide="layout-grid"></i><span>Inicio</span></a>
-      <span class="privacy-chip"><i data-lucide="shield-check"></i> Procesamiento local</span>
+      <span class="privacy-chip" title="Los datos permanecen en este navegador"><i data-lucide="hard-drive"></i><span id="localSaveStatus">Guardado local automático</span></span>
       <button id="newReconciliationBtn" class="button button-ghost button-small" type="button">
         <i data-lucide="rotate-ccw"></i> Nueva conciliación
       </button>
@@ -51,10 +51,12 @@
             <p class="lead">Compare los movimientos del sistema contable con una planilla de caja o banco, revise las coincidencias propuestas y exporte el resultado a Excel.</p>
             <div class="privacy-notice">
               <i data-lucide="lock-keyhole"></i>
-              <div><strong>Sus archivos permanecen en este equipo.</strong><span>No se envían movimientos ni importes a ningún servidor y no se guardan en el navegador.</span></div>
+              <div><strong>Sus archivos permanecen en este equipo.</strong><span>No se envían movimientos ni importes a ningún servidor. El progreso se guarda localmente en este navegador para recuperarlo al actualizar la página.</span></div>
             </div>
             <div class="button-row">
               <button id="startBtn" class="button button-primary" type="button">Comenzar conciliación <i data-lucide="arrow-right"></i></button>
+              <button id="resumeReconciliationBtn" class="button button-secondary" type="button"><i data-lucide="folder-up"></i> Continuar conciliación anterior</button>
+              <input id="resumeReconciliationInput" type="file" accept=".xlsx" hidden>
               <button class="button button-secondary" type="button" data-open-formats><i data-lucide="table-properties"></i> Ver formatos admitidos</button>
             </div>
           </div>
@@ -228,7 +230,7 @@
       <section class="step-panel" data-panel="7">
         <div class="export-layout">
           <div class="export-main">
-            <span class="export-icon"><i data-lucide="file-spreadsheet"></i></span><span class="step-kicker">Paso 7 de 7</span><h1>Exportar conciliación</h1><p>El libro incluirá el resumen, los casos confirmados y posibles, los pendientes, los datos originales y los errores de importación.</p>
+            <span class="export-icon"><i data-lucide="file-spreadsheet"></i></span><span class="step-kicker">Paso 7 de 7</span><h1>Exportar conciliación</h1><p>El libro incluirá el resumen, importes separados en Débito y Crédito, los casos confirmados y posibles, los pendientes y los datos originales. También podrá volver a cargarlo para continuar más adelante.</p>
             <div id="exportSummary" class="export-summary"></div>
             <button id="downloadExcelBtn" class="button button-primary button-large" type="button"><i data-lucide="download"></i> Descargar resultado en Excel</button>
             <p class="local-reminder"><i data-lucide="shield-check"></i> El archivo se genera localmente en este navegador.</p>
