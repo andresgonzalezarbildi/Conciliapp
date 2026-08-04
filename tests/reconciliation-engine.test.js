@@ -39,6 +39,9 @@ vm.runInContext(fs.readFileSync(require('path').join(__dirname, '..', 'app.js'),
 const app = context.ReconciliationApp;
 assert(app, 'exports missing');
 assert.equal(app.getState().movementEditor.statusFilter, 'pending', 'movement editor must open with pending movements');
+const editorCss = fs.readFileSync(require('path').join(__dirname, '..', 'styles.css'), 'utf8');
+assert(/\.movement-editor-card\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;/s.test(editorCss), 'movement editor card must constrain the scrollable content');
+assert(/\.movement-editor-content\s*\{[^}]*overflow-y:\s*scroll;/s.test(editorCss), 'movement editor content must have vertical scrolling');
 
 const day = d => new Date(`${d}T12:00:00Z`).getTime();
 const mov = (id, source, date, description, amount) => ({ id, source, row: 1, dateTime: day(date), description, amount, type: amount >= 0 ? 'debit' : 'credit' });
