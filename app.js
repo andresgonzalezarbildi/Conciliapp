@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_BUILD = "2026.08.04-2";
+const APP_BUILD = "2026.08.04-3";
 const STATE_SCHEMA_VERSION = 1;
 const STATE_SHEET_NAME = "Estado ConciliApp";
 const STATE_CHUNK_SIZE = 30000;
@@ -86,7 +86,9 @@ const state = {
   },
   workspace: createWorkspaceState(),
   accountTransfer: createAccountTransferState(),
+  movementEditor: createMovementEditorState(),
   transferLog: [],
+  movementEditLog: [],
   persistence: { restoring: false, saveTimer: null, saveErrorShown: false, lastSavedAt: null }
 };
 
@@ -108,6 +110,19 @@ function createAccountTransferState() {
     selectedDestination: new Set(),
     typeOverrides: new Map(),
     dragPayload: null
+  };
+}
+
+function createMovementEditorState() {
+  return {
+    accounts: [],
+    selectedAccountId: "",
+    search: "",
+    sourceFilter: "all",
+    statusFilter: "all",
+    page: 1,
+    editing: null,
+    dirty: false
   };
 }
 
@@ -230,6 +245,14 @@ function cacheDom() {
   dom.accountTransferContent = document.getElementById("accountTransferContent");
   dom.accountTransferInput = document.getElementById("accountTransferInput");
   dom.savedAccountSelect = document.getElementById("savedAccountSelect");
+  dom.movementEditorDialog = document.getElementById("movementEditorDialog");
+  dom.movementEditorAccounts = document.getElementById("movementEditorAccounts");
+  dom.movementEditorContent = document.getElementById("movementEditorContent");
+  dom.movementEditorPagination = document.getElementById("movementEditorPagination");
+  dom.movementEditorSavedSelect = document.getElementById("movementEditorSavedSelect");
+  dom.movementEditorFilesInput = document.getElementById("movementEditorFilesInput");
+  dom.movementEditDialog = document.getElementById("movementEditDialog");
+  dom.movementEditForm = document.getElementById("movementEditForm");
   dom.toastRegion = document.getElementById("toastRegion");
   dom.continueButtons = {
     system: document.getElementById("continueSystemBtn"),
@@ -239,6 +262,8 @@ function cacheDom() {
 
 function bindGlobalEvents() {
   document.getElementById("startBtn").addEventListener("click", () => goToStep(2));
+  document.getElementById("openMovementEditorBtn").addEventListener("click", openMovementEditor);
+  document.getElementById("headerMovementEditorBtn").addEventListener("click", openMovementEditor);
   document.getElementById("resumeReconciliationBtn").addEventListener("click", () => document.getElementById("resumeReconciliationInput").click());
   document.getElementById("resumeReconciliationInput").addEventListener("change", async event => {
     const file = event.target.files?.[0];
@@ -310,7 +335,7 @@ function bindGlobalEvents() {
   document.getElementById("rejectAllPossibleBtn").addEventListener("click", rejectAllPossible);
   document.getElementById("retryPendingBtn").addEventListener("click", openRetryDialog);
   document.getElementById("trimPeriodBtn").addEventListener("click", openPeriodTrimDialog);
-  document.getElementById("manageAccountsBtn").addEventListener("click", openAccountTransferDialog);
+  document.getElementById("manageAccountsBtn")?.addEventListener("click", openAccountTransferDialog);
   document.getElementById("loadAccountTransferBtn").addEventListener("click", () => dom.accountTransferInput.click());
   dom.accountTransferInput.addEventListener("change", async event => {
     const file = event.target.files?.[0];
@@ -323,6 +348,36 @@ function bindGlobalEvents() {
   document.getElementById("saveAccountTransfersBtn").addEventListener("click", saveAccountTransfers);
   document.getElementById("openDestinationAccountBtn").addEventListener("click", openDestinationAccount);
   document.querySelectorAll("[data-close-account-transfer]").forEach(button => button.addEventListener("click", () => dom.accountTransferDialog.close()));
+  document.getElementById("addMovementAccountFilesBtn").addEventListener("click", () => dom.movementEditorFilesInput.click());
+  dom.movementEditorFilesInput.addEventListener("change", async event => {
+    const files = [...(event.target.files || [])];
+    event.target.value = "";
+    if (files.length) await loadMovementEditorFiles(files);
+  });
+  document.getElementById("addSavedMovementAccountBtn").addEventListener("click", addSavedMovementEditorAccount);
+  document.getElementById("createMovementAccountBtn").addEventListener("click", createEmptyMovementEditorAccount);
+  document.getElementById("movementEditorSearch").addEventListener("input", event => {
+    state.movementEditor.search = event.target.value.trim().toLowerCase();
+    state.movementEditor.page = 1;
+    renderMovementEditor();
+  });
+  document.getElementById("movementEditorSourceFilter").addEventListener("change", event => {
+    state.movementEditor.sourceFilter = event.target.value;
+    state.movementEditor.page = 1;
+    renderMovementEditor();
+  });
+  document.getElementById("movementEditorStatusFilter").addEventListener("change", event => {
+    state.movementEditor.statusFilter = event.target.value;
+    state.movementEditor.page = 1;
+    renderMovementEditor();
+  });
+  document.getElementById("saveMovementAccountsBtn").addEventListener("click", saveAllMovementEditorAccounts);
+  document.getElementById("openSelectedMovementAccountBtn").addEventListener("click", openSelectedMovementEditorAccount);
+  document.getElementById("downloadMovementAccountBtn").addEventListener("click", downloadSelectedMovementEditorAccount);
+  document.querySelectorAll("[data-close-movement-editor]").forEach(button => button.addEventListener("click", closeMovementEditor));
+  document.querySelectorAll("[data-close-movement-edit]").forEach(button => button.addEventListener("click", () => dom.movementEditDialog.close()));
+  dom.movementEditForm.addEventListener("submit", saveMovementEditorEdit);
+  document.getElementById("deleteMovementBtn").addEventListener("click", deleteMovementEditorMovement);
   document.querySelectorAll("[data-close-retry]").forEach(button => button.addEventListener("click", () => dom.retryDialog.close()));
   document.querySelectorAll("[data-close-period]").forEach(button => button.addEventListener("click", () => dom.periodTrimDialog.close()));
   dom.retryForm.addEventListener("submit", event => {
@@ -346,6 +401,8 @@ function bindGlobalEvents() {
       if (dom.retryDialog.open) dom.retryDialog.close();
       if (dom.periodTrimDialog.open) dom.periodTrimDialog.close();
       if (dom.accountTransferDialog.open) dom.accountTransferDialog.close();
+      if (dom.movementEditDialog.open) dom.movementEditDialog.close();
+      else if (dom.movementEditorDialog.open) closeMovementEditor();
     }
   });
   document.addEventListener("visibilitychange", () => {
@@ -1434,7 +1491,9 @@ function resetApplication() {
   };
   state.workspace = createWorkspaceState();
   state.accountTransfer = createAccountTransferState();
+  state.movementEditor = createMovementEditorState();
   state.transferLog = [];
+  state.movementEditLog = [];
   state.persistence.lastSavedAt = null;
   updateLocalSaveStatus("Sin progreso guardado");
   document.querySelectorAll("[data-source-editor]").forEach(editor => {
@@ -1751,6 +1810,7 @@ function normalizeTransferSnapshot(snapshot, fallbackName = "Conciliación") {
   normalized.results ||= createEmptyResults();
   normalized.results.reconciliations ||= [];
   normalized.transferLog ||= [];
+  normalized.movementEditLog ||= [];
   normalized.review ||= {};
   normalized.review.periodFilter ||= { from: "", to: "", appliedAt: null };
   return normalized;
@@ -2144,6 +2204,540 @@ function saveAccountTransfers() {
 
 function openDestinationAccount() {
   commitAccountTransfer(true);
+}
+
+
+function movementEditorAccountById(accountId) {
+  return state.movementEditor.accounts.find(account => account.snapshot.workspace.id === accountId) || null;
+}
+
+function ensureUniqueMovementEditorWorkspace(snapshot) {
+  const existing = new Set(state.movementEditor.accounts.map(account => account.snapshot.workspace.id));
+  if (!snapshot.workspace?.id || existing.has(snapshot.workspace.id)) {
+    snapshot.workspace ||= {};
+    snapshot.workspace.id = `workspace-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  }
+  return snapshot;
+}
+
+function createEmptyMovementSnapshot(name) {
+  const workspace = createWorkspaceState("", name);
+  const emptySource = (key, label) => ({
+    ...createEmptySource(key, label),
+    fileName: `${name || label}.xlsx`,
+    selectedSheet: "Movimientos editados",
+    movements: [],
+    rows: [],
+    matrix: [],
+    headers: [],
+    restoredState: true,
+    restoredRowCount: 0
+  });
+  return {
+    schemaVersion: STATE_SCHEMA_VERSION,
+    appBuild: APP_BUILD,
+    savedAt: new Date().toISOString(),
+    workspace,
+    transferLog: [],
+    movementEditLog: [],
+    exportFileName: name,
+    config: { ...DEFAULT_CONFIG },
+    sources: { system: emptySource("system", "Sistema contable"), bank: emptySource("bank", "Caja o banco") },
+    results: createEmptyResults(),
+    review: { tab: "pending", search: "", type: "all", sort: "date-asc", periodFilter: { from: "", to: "", appliedAt: null }, rejectedSignatures: [], rejectedProposals: [] }
+  };
+}
+
+async function openMovementEditor() {
+  state.movementEditor = createMovementEditorState();
+  if (snapshotHasProgress(createStateSnapshot())) {
+    const current = normalizeTransferSnapshot(createStateSnapshot(), getCurrentWorkspaceName());
+    state.movementEditor.accounts.push({ snapshot: current, origin: "current" });
+    state.movementEditor.selectedAccountId = current.workspace.id;
+  }
+  await populateMovementEditorSavedSelect();
+  document.getElementById("movementEditorSearch").value = "";
+  document.getElementById("movementEditorSourceFilter").value = "all";
+  document.getElementById("movementEditorStatusFilter").value = "all";
+  renderMovementEditor();
+  dom.movementEditorDialog.showModal();
+  refreshIcons(dom.movementEditorDialog);
+}
+
+function closeMovementEditor() {
+  dom.movementEditDialog.open && dom.movementEditDialog.close();
+  dom.movementEditorDialog.close();
+}
+
+async function populateMovementEditorSavedSelect() {
+  dom.movementEditorSavedSelect.innerHTML = `<option value="">Seleccione una cuenta local</option>`;
+  if (!window.indexedDB) return;
+  try {
+    const loaded = new Set(state.movementEditor.accounts.map(account => account.snapshot.workspace.id));
+    const entries = await readSavedWorkspaceSnapshots();
+    entries.sort((a, b) => snapshotWorkspaceName(a.snapshot).localeCompare(snapshotWorkspaceName(b.snapshot), "es"));
+    entries.forEach(entry => {
+      if (!entry.snapshot?.workspace?.id || loaded.has(entry.snapshot.workspace.id)) return;
+      const option = document.createElement("option");
+      option.value = String(entry.key);
+      option.textContent = snapshotWorkspaceName(entry.snapshot);
+      dom.movementEditorSavedSelect.append(option);
+    });
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+async function addSavedMovementEditorAccount() {
+  const key = dom.movementEditorSavedSelect.value;
+  if (!key) return showToast("Seleccione una cuenta", "Elija una cuenta guardada para agregarla al editor.", "error");
+  try {
+    const raw = await readPersistedSnapshot(key);
+    if (!raw) throw new Error("La cuenta guardada ya no está disponible.");
+    const snapshot = ensureUniqueMovementEditorWorkspace(normalizeTransferSnapshot(raw, "Cuenta"));
+    state.movementEditor.accounts.push({ snapshot, origin: "local" });
+    state.movementEditor.selectedAccountId = snapshot.workspace.id;
+    state.movementEditor.page = 1;
+    await populateMovementEditorSavedSelect();
+    renderMovementEditor();
+  } catch (error) {
+    console.error(error);
+    showToast("No se pudo agregar", error.message || "La cuenta no es compatible.", "error");
+  }
+}
+
+async function loadMovementEditorFiles(files) {
+  if (typeof XLSX === "undefined") return showToast("Lector de Excel no disponible", "Vuelva a abrir la aplicación con conexión a Internet.", "error");
+  let added = 0;
+  for (const file of files) {
+    try {
+      if (!/\.xlsx$/i.test(file.name || "")) throw new Error("Solo se admiten exportaciones XLSX de ConciliApp.");
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: false, dense: false });
+      const snapshot = ensureUniqueMovementEditorWorkspace(normalizeTransferSnapshot(extractStateSnapshotFromWorkbook(workbook), file.name.replace(/\.xlsx$/i, "")));
+      snapshot.workspace.name ||= file.name.replace(/\.xlsx$/i, "");
+      state.movementEditor.accounts.push({ snapshot, origin: "file", fileName: file.name });
+      state.movementEditor.selectedAccountId = snapshot.workspace.id;
+      added++;
+    } catch (error) {
+      console.error(error);
+      showToast(`No se pudo cargar ${file.name}`, error.message || "El archivo no contiene una cuenta compatible.", "error", 8000);
+    }
+  }
+  if (added) {
+    state.movementEditor.page = 1;
+    renderMovementEditor();
+    showToast("Cuentas agregadas", `${added} cuenta(s) quedaron disponibles para editar.`, "success");
+  }
+}
+
+function createEmptyMovementEditorAccount() {
+  const input = document.getElementById("newMovementAccountName");
+  const name = input.value.trim();
+  if (!name) return showToast("Indique un nombre", "Escriba el nombre de la nueva cuenta.", "error");
+  const snapshot = createEmptyMovementSnapshot(name);
+  state.movementEditor.accounts.push({ snapshot, origin: "new" });
+  state.movementEditor.selectedAccountId = snapshot.workspace.id;
+  state.movementEditor.page = 1;
+  state.movementEditor.dirty = true;
+  input.value = "";
+  renderMovementEditor();
+}
+
+function snapshotMovementReservation(snapshot) {
+  const map = new Map();
+  (snapshot.results?.reconciliations || []).forEach(item => {
+    const status = item.status === "confirmed" ? "confirmed" : "possible";
+    [...(item.systemIds || []), ...(item.bankIds || [])].forEach(id => map.set(id, status));
+  });
+  return map;
+}
+
+function movementEditorRows(snapshot) {
+  const reservations = snapshotMovementReservation(snapshot);
+  const rows = [];
+  for (const sourceKey of ["system", "bank"]) {
+    for (const movement of snapshot.sources?.[sourceKey]?.movements || []) {
+      rows.push({ movement, sourceKey, reservation: reservations.get(movement.id) || "pending" });
+    }
+  }
+  const query = state.movementEditor.search;
+  return rows.filter(row => {
+    if (state.movementEditor.sourceFilter !== "all" && row.sourceKey !== state.movementEditor.sourceFilter) return false;
+    if (state.movementEditor.statusFilter === "pending" && row.reservation !== "pending") return false;
+    if (state.movementEditor.statusFilter === "reconciled" && row.reservation === "pending") return false;
+    if (!query) return true;
+    const item = row.movement;
+    return [item.id, item.row, item.dateKey, formatDate(reviveStoredDate(item.date)), item.description, item.amount, item.status].join(" ").toLowerCase().includes(query);
+  }).sort((a, b) => String(a.movement.dateKey || "").localeCompare(String(b.movement.dateKey || "")) || Number(a.movement.row || 0) - Number(b.movement.row || 0));
+}
+
+function renderMovementEditor() {
+  const editor = state.movementEditor;
+  const selected = movementEditorAccountById(editor.selectedAccountId);
+  dom.movementEditorAccounts.innerHTML = editor.accounts.length
+    ? `<div class="movement-editor-account-list">${editor.accounts.map(account => {
+        const snapshot = account.snapshot;
+        const systemCount = snapshot.sources?.system?.movements?.length || 0;
+        const bankCount = snapshot.sources?.bank?.movements?.length || 0;
+        return `<button class="movement-editor-account ${snapshot.workspace.id === editor.selectedAccountId ? "active" : ""}" type="button" data-movement-account="${escapeAttribute(snapshot.workspace.id)}"><strong>${escapeHtml(snapshotWorkspaceName(snapshot))}</strong><span>${(systemCount + bankCount).toLocaleString("es-UY")}</span><small>${systemCount.toLocaleString("es-UY")} sistema · ${bankCount.toLocaleString("es-UY")} caja/banco</small></button>`;
+      }).join("")}</div>`
+    : `<div class="movement-editor-empty-accounts"><div><strong>No hay cuentas cargadas</strong><p>Agregue exportaciones de ConciliApp o cree una cuenta vacía.</p></div></div>`;
+  dom.movementEditorAccounts.querySelectorAll("[data-movement-account]").forEach(button => button.addEventListener("click", () => {
+    editor.selectedAccountId = button.dataset.movementAccount;
+    editor.page = 1;
+    renderMovementEditor();
+  }));
+  if (!selected) {
+    dom.movementEditorContent.innerHTML = `<div class="movement-editor-placeholder"><div><strong>Seleccione o agregue una cuenta</strong><p>Los cambios se realizan antes de iniciar el proceso de conciliación.</p></div></div>`;
+    dom.movementEditorPagination.innerHTML = "";
+    syncMovementEditorButtons();
+    refreshIcons(dom.movementEditorDialog);
+    return;
+  }
+  const snapshot = selected.snapshot;
+  const rows = movementEditorRows(snapshot);
+  const totalPages = Math.max(1, Math.ceil(rows.length / 100));
+  editor.page = clamp(editor.page, 1, totalPages);
+  const visible = rows.slice((editor.page - 1) * 100, editor.page * 100);
+  dom.movementEditorContent.innerHTML = `
+    <div class="movement-editor-account-heading">
+      <div><h3>${escapeHtml(snapshotWorkspaceName(snapshot))}</h3><p>${rows.length.toLocaleString("es-UY")} movimientos visibles · editar una fila conciliada deshace únicamente su conciliación.</p></div>
+      <div class="movement-editor-rename"><input data-movement-account-name type="text" maxlength="80" value="${escapeAttribute(snapshotWorkspaceName(snapshot))}"><button class="button button-secondary button-small" data-save-account-name type="button"><i data-lucide="pencil"></i> Renombrar</button></div>
+    </div>
+    <div class="movement-editor-table-wrap"><table class="movement-editor-table">
+      <colgroup><col style="width:92px"><col style="width:115px"><col><col style="width:110px"><col style="width:110px"><col style="width:110px"><col style="width:92px"></colgroup>
+      <thead><tr><th>Fecha</th><th>Origen</th><th>Descripción</th><th>Débito</th><th>Crédito</th><th>Estado</th><th></th></tr></thead>
+      <tbody>${visible.length ? visible.map(row => {
+        const item = row.movement;
+        const amounts = movementDebitCredit(item);
+        const stateLabel = row.reservation === "confirmed" ? "Conciliado" : row.reservation === "possible" ? "Posible" : "Pendiente";
+        return `<tr><td>${escapeHtml(item.dateKey ? formatDateInput(item.dateKey) : formatDate(reviveStoredDate(item.date)))}</td><td><span class="movement-editor-source-badge">${row.sourceKey === "system" ? "Sistema" : "Caja / banco"}</span></td><td class="movement-editor-description" title="${escapeAttribute(item.description)}">${escapeHtml(item.description)}</td><td class="amount">${amounts.debit ? formatMoney(amounts.debit) : ""}</td><td class="amount negative">${amounts.credit ? formatMoney(amounts.credit) : ""}</td><td><span class="movement-editor-state-badge ${row.reservation === "pending" ? "" : row.reservation}">${stateLabel}</span></td><td class="movement-editor-actions"><button class="button button-secondary button-small" data-edit-movement data-source="${row.sourceKey}" data-id="${escapeAttribute(item.id)}" type="button"><i data-lucide="pencil"></i> Editar</button></td></tr>`;
+      }).join("") : `<tr><td colspan="7" class="account-empty-group">No hay movimientos para los filtros seleccionados.</td></tr>`}</tbody>
+    </table></div>`;
+  dom.movementEditorContent.querySelector("[data-save-account-name]").addEventListener("click", () => {
+    const name = dom.movementEditorContent.querySelector("[data-movement-account-name]").value.trim();
+    if (!name) return showToast("Nombre no válido", "La cuenta debe tener un nombre.", "error");
+    snapshot.workspace.name = name;
+    snapshot.exportFileName = name;
+    snapshot.savedAt = new Date().toISOString();
+    editor.dirty = true;
+    renderMovementEditor();
+  });
+  dom.movementEditorContent.querySelectorAll("[data-edit-movement]").forEach(button => button.addEventListener("click", () => openMovementEditDialog(snapshot.workspace.id, button.dataset.source, button.dataset.id)));
+  renderMovementEditorPagination(totalPages, rows.length);
+  syncMovementEditorButtons();
+  refreshIcons(dom.movementEditorDialog);
+}
+
+function renderMovementEditorPagination(totalPages, totalRows) {
+  if (totalPages <= 1) {
+    dom.movementEditorPagination.innerHTML = `<span>${totalRows.toLocaleString("es-UY")} movimientos</span>`;
+    return;
+  }
+  dom.movementEditorPagination.innerHTML = `<button class="button button-secondary button-small" data-editor-page="prev" type="button" ${state.movementEditor.page <= 1 ? "disabled" : ""}><i data-lucide="chevron-left"></i> Anterior</button><span>Página ${state.movementEditor.page} de ${totalPages} · ${totalRows.toLocaleString("es-UY")} movimientos</span><button class="button button-secondary button-small" data-editor-page="next" type="button" ${state.movementEditor.page >= totalPages ? "disabled" : ""}>Siguiente <i data-lucide="chevron-right"></i></button>`;
+  dom.movementEditorPagination.querySelectorAll("[data-editor-page]").forEach(button => button.addEventListener("click", () => {
+    state.movementEditor.page += button.dataset.editorPage === "next" ? 1 : -1;
+    renderMovementEditor();
+  }));
+}
+
+function syncMovementEditorButtons() {
+  const hasSelected = Boolean(movementEditorAccountById(state.movementEditor.selectedAccountId));
+  document.getElementById("downloadMovementAccountBtn").disabled = !hasSelected;
+  document.getElementById("openSelectedMovementAccountBtn").disabled = !hasSelected;
+  document.getElementById("saveMovementAccountsBtn").disabled = !state.movementEditor.accounts.length;
+}
+
+function openMovementEditDialog(accountId, sourceKey, movementId) {
+  const account = movementEditorAccountById(accountId);
+  const movement = account?.snapshot.sources?.[sourceKey]?.movements?.find(item => item.id === movementId);
+  if (!account || !movement) return;
+  state.movementEditor.editing = { accountId, sourceKey, movementId };
+  const form = dom.movementEditForm;
+  form.elements.namedItem("accountId").innerHTML = state.movementEditor.accounts.map(entry => `<option value="${escapeAttribute(entry.snapshot.workspace.id)}">${escapeHtml(snapshotWorkspaceName(entry.snapshot))}</option>`).join("");
+  form.elements.namedItem("accountId").value = accountId;
+  form.elements.namedItem("sourceKey").value = sourceKey;
+  form.elements.namedItem("date").value = movement.dateKey || toDateKey(reviveStoredDate(movement.date));
+  const amounts = movementDebitCredit(movement);
+  form.elements.namedItem("type").value = amounts.credit > 0 ? "credit" : "debit";
+  form.elements.namedItem("amount").value = roundMoney(Math.max(amounts.debit, amounts.credit, Math.abs(Number(movement.amount) || 0)));
+  form.elements.namedItem("description").value = movement.description || "";
+  form.elements.namedItem("status").value = movement.status || "";
+  const reservation = snapshotMovementReservation(account.snapshot).get(movementId);
+  const warning = document.getElementById("movementEditWarning");
+  warning.classList.toggle("hidden", !reservation);
+  warning.innerHTML = reservation ? `<i data-lucide="unlink"></i><span>Este movimiento está ${reservation === "confirmed" ? "conciliado" : "en una propuesta posible"}. Al aplicar cambios se deshará únicamente esa agrupación.</span>` : "";
+  dom.movementEditDialog.showModal();
+  refreshIcons(dom.movementEditDialog);
+}
+
+function invalidateSnapshotMovementReconciliations(snapshot, movementId) {
+  const reconciliations = snapshot.results?.reconciliations || [];
+  const removed = reconciliations.filter(item => (item.systemIds || []).includes(movementId) || (item.bankIds || []).includes(movementId));
+  snapshot.results ||= createEmptyResults();
+  snapshot.results.reconciliations = reconciliations.filter(item => !removed.includes(item));
+  return removed.length;
+}
+
+function uniqueSnapshotMovementId(snapshot, sourceKey, preferred = "") {
+  const existing = new Set((snapshot.sources?.[sourceKey]?.movements || []).map(item => item.id));
+  if (preferred && !existing.has(preferred)) return preferred;
+  let candidate;
+  do candidate = `${sourceKey}-edit-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  while (existing.has(candidate));
+  return candidate;
+}
+
+function editMovementAcrossSnapshots(snapshots, locator, changes) {
+  const originSnapshot = snapshots.find(snapshot => snapshot.workspace?.id === locator.accountId);
+  const destinationSnapshot = snapshots.find(snapshot => snapshot.workspace?.id === changes.accountId);
+  if (!originSnapshot || !destinationSnapshot || !["system", "bank"].includes(locator.sourceKey) || !["system", "bank"].includes(changes.sourceKey)) throw new Error("No se encontró la cuenta u origen seleccionado.");
+  const originList = originSnapshot.sources?.[locator.sourceKey]?.movements || [];
+  const index = originList.findIndex(item => item.id === locator.movementId);
+  if (index < 0) throw new Error("El movimiento ya no existe.");
+  const movement = originList[index];
+  const parsedDate = changes.date instanceof Date ? changes.date : parseDateValue(changes.date);
+  const magnitude = roundMoney(Math.abs(Number(changes.amount)));
+  if (!parsedDate) throw new Error("La fecha no es válida.");
+  if (!String(changes.description || "").trim()) throw new Error("La descripción no puede quedar vacía.");
+  if (!(magnitude > 0)) throw new Error("El importe debe ser mayor que cero.");
+  if (!["debit", "credit"].includes(changes.type)) throw new Error("Seleccione débito o crédito.");
+  const invalidated = invalidateSnapshotMovementReconciliations(originSnapshot, movement.id);
+  originList.splice(index, 1);
+  const movedAccount = originSnapshot.workspace.id !== destinationSnapshot.workspace.id;
+  const movedSource = locator.sourceKey !== changes.sourceKey;
+  const newId = movedAccount || movedSource ? uniqueSnapshotMovementId(destinationSnapshot, changes.sourceKey) : movement.id;
+  const at = new Date().toISOString();
+  const beforeAmounts = movementDebitCredit(movement);
+  const beforeType = beforeAmounts.credit > 0 ? "credit" : "debit";
+  const edited = {
+    ...movement,
+    id: newId,
+    source: changes.sourceKey,
+    date: parsedDate.toISOString(),
+    dateKey: toDateKey(parsedDate),
+    description: String(changes.description).trim(),
+    amount: changes.type === "debit" ? magnitude : -magnitude,
+    debitAmount: changes.type === "debit" ? magnitude : 0,
+    creditAmount: changes.type === "credit" ? magnitude : 0,
+    type: changes.type,
+    status: String(changes.status || "").trim(),
+    editedAt: at,
+    editHistory: [...(Array.isArray(movement.editHistory) ? movement.editHistory : []), { at, fromAccount: snapshotWorkspaceName(originSnapshot), toAccount: snapshotWorkspaceName(destinationSnapshot), fromSource: locator.sourceKey, toSource: changes.sourceKey, beforeType, afterType: changes.type, beforeAmount: Math.max(beforeAmounts.debit, beforeAmounts.credit), afterAmount: magnitude }]
+  };
+  if (movedAccount) {
+    edited.transferOriginId = movement.transferOriginId || movement.id;
+    edited.transferOriginAccount = movement.transferOriginAccount || snapshotWorkspaceName(originSnapshot);
+  }
+  destinationSnapshot.sources[changes.sourceKey].movements.push(edited);
+  destinationSnapshot.sources[changes.sourceKey].movements.sort((a, b) => String(a.dateKey || "").localeCompare(String(b.dateKey || "")) || Number(a.row || 0) - Number(b.row || 0));
+  for (const snapshot of new Set([originSnapshot, destinationSnapshot])) {
+    snapshot.movementEditLog ||= [];
+    snapshot.savedAt = at;
+    for (const key of ["system", "bank"]) snapshot.sources[key].restoredRowCount = snapshot.sources[key].movements.length;
+  }
+  const logEntry = {
+    id: `movement-edit-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    at,
+    action: movedAccount ? "move" : movedSource ? "change-source" : "edit",
+    fromAccount: snapshotWorkspaceName(originSnapshot),
+    toAccount: snapshotWorkspaceName(destinationSnapshot),
+    fromSource: locator.sourceKey,
+    toSource: changes.sourceKey,
+    oldId: movement.id,
+    newId,
+    oldDateKey: movement.dateKey || toDateKey(reviveStoredDate(movement.date)),
+    newDateKey: edited.dateKey,
+    oldDescription: movement.description,
+    newDescription: edited.description,
+    oldType: beforeType,
+    newType: changes.type,
+    oldAmount: roundMoney(Math.max(beforeAmounts.debit, beforeAmounts.credit)),
+    newAmount: magnitude,
+    invalidated
+  };
+  originSnapshot.movementEditLog.push({ ...logEntry, direction: movedAccount ? "out" : "local" });
+  if (movedAccount) destinationSnapshot.movementEditLog.push({ ...logEntry, direction: "in" });
+  if (movedAccount) {
+    const transferEntry = {
+      id: `transfer-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      at,
+      sourceKey: changes.sourceKey,
+      movementOriginId: movement.transferOriginId || movement.id,
+      movementDestinationId: edited.id,
+      row: movement.row,
+      date: edited.date,
+      dateKey: edited.dateKey,
+      description: edited.description,
+      amount: edited.amount,
+      debitAmount: edited.debitAmount,
+      creditAmount: edited.creditAmount,
+      originalAmount: movement.amount,
+      originalDebitAmount: beforeAmounts.debit,
+      originalCreditAmount: beforeAmounts.credit,
+      originalType: beforeType,
+      destinationType: changes.type,
+      fromWorkspaceId: originSnapshot.workspace.id,
+      fromAccount: snapshotWorkspaceName(originSnapshot),
+      toWorkspaceId: destinationSnapshot.workspace.id,
+      toAccount: snapshotWorkspaceName(destinationSnapshot)
+    };
+    originSnapshot.transferLog ||= [];
+    destinationSnapshot.transferLog ||= [];
+    originSnapshot.transferLog.push({ ...transferEntry, direction: "out" });
+    destinationSnapshot.transferLog.push({ ...transferEntry, direction: "in" });
+  }
+  return { movement: edited, invalidated, movedAccount, movedSource };
+}
+
+function deleteMovementAcrossSnapshots(snapshots, locator) {
+  const snapshot = snapshots.find(item => item.workspace?.id === locator.accountId);
+  if (!snapshot || !["system", "bank"].includes(locator.sourceKey)) throw new Error("No se encontró la cuenta seleccionada.");
+  const list = snapshot.sources?.[locator.sourceKey]?.movements || [];
+  const index = list.findIndex(item => item.id === locator.movementId);
+  if (index < 0) throw new Error("El movimiento ya no existe.");
+  const [movement] = list.splice(index, 1);
+  const invalidated = invalidateSnapshotMovementReconciliations(snapshot, movement.id);
+  const amounts = movementDebitCredit(movement);
+  const at = new Date().toISOString();
+  snapshot.movementEditLog ||= [];
+  snapshot.movementEditLog.push({ id: `movement-delete-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`, at, action: "delete", fromAccount: snapshotWorkspaceName(snapshot), toAccount: "", fromSource: locator.sourceKey, toSource: "", oldId: movement.id, newId: "", oldDateKey: movement.dateKey || toDateKey(reviveStoredDate(movement.date)), newDateKey: "", oldDescription: movement.description, newDescription: "", oldType: amounts.credit > 0 ? "credit" : "debit", newType: "", oldAmount: Math.max(amounts.debit, amounts.credit), newAmount: 0, invalidated });
+  snapshot.sources[locator.sourceKey].restoredRowCount = list.length;
+  snapshot.savedAt = at;
+  return { movement, invalidated };
+}
+
+function saveMovementEditorEdit(event) {
+  event.preventDefault();
+  const editing = state.movementEditor.editing;
+  if (!editing) return;
+  const data = new FormData(dom.movementEditForm);
+  try {
+    const result = editMovementAcrossSnapshots(state.movementEditor.accounts.map(account => account.snapshot), editing, {
+      accountId: String(data.get("accountId") || ""),
+      sourceKey: String(data.get("sourceKey") || ""),
+      date: String(data.get("date") || ""),
+      type: String(data.get("type") || ""),
+      amount: Number(data.get("amount")),
+      description: String(data.get("description") || ""),
+      status: String(data.get("status") || "")
+    });
+    state.movementEditor.selectedAccountId = String(data.get("accountId"));
+    state.movementEditor.page = 1;
+    state.movementEditor.dirty = true;
+    state.movementEditor.editing = null;
+    dom.movementEditDialog.close();
+    renderMovementEditor();
+    const details = [result.movedAccount ? "movido de cuenta" : "", result.movedSource ? "cambiado de origen" : "", result.invalidated ? `${result.invalidated} conciliación(es) deshecha(s)` : ""].filter(Boolean).join(" · ");
+    showToast("Movimiento actualizado", details || "Los cambios quedaron aplicados en el editor.", "success", 7000);
+  } catch (error) {
+    showToast("No se pudo aplicar", error.message || "Revise los datos ingresados.", "error");
+  }
+}
+
+function deleteMovementEditorMovement() {
+  const editing = state.movementEditor.editing;
+  if (!editing) return;
+  try {
+    const result = deleteMovementAcrossSnapshots(state.movementEditor.accounts.map(account => account.snapshot), editing);
+    state.movementEditor.dirty = true;
+    state.movementEditor.editing = null;
+    dom.movementEditDialog.close();
+    renderMovementEditor();
+    showToast("Movimiento eliminado", result.invalidated ? `También se deshicieron ${result.invalidated} conciliación(es) relacionadas.` : "La fila fue eliminada de la cuenta.", "success");
+  } catch (error) {
+    showToast("No se pudo eliminar", error.message || "El movimiento ya no existe.", "error");
+  }
+}
+
+async function saveAllMovementEditorAccounts(silent = false) {
+  if (!state.movementEditor.accounts.length) return false;
+  try {
+    for (const account of state.movementEditor.accounts) {
+      const snapshot = account.snapshot;
+      snapshot.workspace.name = snapshotWorkspaceName(snapshot);
+      snapshot.exportFileName ||= snapshot.workspace.name;
+      snapshot.savedAt = new Date().toISOString();
+      await persistSnapshot(snapshot, workspaceStorageKey(snapshot.workspace.id));
+    }
+    state.movementEditor.dirty = false;
+    await populateMovementEditorSavedSelect();
+    if (!silent) showToast("Cuentas guardadas", "Todos los cambios quedaron guardados localmente.", "success");
+    return true;
+  } catch (error) {
+    console.error(error);
+    showToast("No se pudieron guardar", error.message || "El navegador no permitió completar el guardado.", "error");
+    return false;
+  }
+}
+
+async function openSelectedMovementEditorAccount() {
+  const account = movementEditorAccountById(state.movementEditor.selectedAccountId);
+  if (!account) return;
+  if (!snapshotHasProgress(account.snapshot)) return showToast("Cuenta vacía", "Agregue al menos un movimiento antes de abrirla como conciliación.", "error");
+  if (!await saveAllMovementEditorAccounts(true)) return;
+  await persistSnapshot(account.snapshot);
+  closeMovementEditor();
+  restoreStateSnapshot(account.snapshot);
+  showToast("Cuenta abierta", `${snapshotWorkspaceName(account.snapshot)} quedó como conciliación activa.`, "success");
+}
+
+function movementEditExportRow(item) {
+  return [
+    item.action === "move" ? "Mover de cuenta" : item.action === "change-source" ? "Cambiar origen" : item.action === "delete" ? "Eliminar" : "Editar",
+    formatDateTime(reviveStoredDate(item.at) || new Date()),
+    item.fromAccount || "",
+    item.toAccount || "",
+    item.fromSource === "system" ? "Sistema contable" : item.fromSource === "bank" ? "Caja o banco" : "",
+    item.toSource === "system" ? "Sistema contable" : item.toSource === "bank" ? "Caja o banco" : "",
+    item.oldId || "",
+    item.newId || "",
+    item.oldDateKey ? formatDateInput(item.oldDateKey) : "",
+    item.newDateKey ? formatDateInput(item.newDateKey) : "",
+    item.oldDescription || "",
+    item.newDescription || "",
+    item.oldType ? movementTypeLabel(item.oldType) : "",
+    item.newType ? movementTypeLabel(item.newType) : "",
+    Number(item.oldAmount) || 0,
+    Number(item.newAmount) || 0,
+    Number(item.invalidated) || 0
+  ];
+}
+
+function snapshotMovementEditorExportRow(movement) {
+  const amounts = movementDebitCredit(movement);
+  return [movement.row || "", movement.dateKey ? formatDateInput(movement.dateKey) : formatDate(reviveStoredDate(movement.date)), movement.description || "", amounts.debit, amounts.credit, movementTypeLabel(amounts.credit > 0 ? "credit" : "debit"), movement.status || "", movement.id || ""];
+}
+
+function downloadSelectedMovementEditorAccount() {
+  const account = movementEditorAccountById(state.movementEditor.selectedAccountId);
+  if (!account) return;
+  if (typeof XLSX === "undefined") return showToast("Lector de Excel no disponible", "Vuelva a abrir la aplicación con conexión a Internet.", "error");
+  try {
+    const snapshot = account.snapshot;
+    const workbook = XLSX.utils.book_new();
+    const summary = XLSX.utils.aoa_to_sheet([
+      ["Cuenta", snapshotWorkspaceName(snapshot)],
+      ["Movimientos del sistema", snapshot.sources.system.movements.length],
+      ["Movimientos de caja o banco", snapshot.sources.bank.movements.length],
+      ["Conciliaciones conservadas", snapshot.results?.reconciliations?.length || 0],
+      ["Ediciones registradas", snapshot.movementEditLog?.length || 0],
+      ["Generado", formatDateTime(new Date())]
+    ]);
+    appendSheet(workbook, summary, "Resumen edición");
+    const headers = ["Fila original", "Fecha", "Descripción", "Débito", "Crédito", "Tipo", "Estado original", "ID"];
+    appendSheet(workbook, createStyledDataSheet(headers, snapshot.sources.system.movements.map(snapshotMovementEditorExportRow), { fill: "EDF5FA", numericColumns: [3, 4] }), "Movimientos del sistema");
+    appendSheet(workbook, createStyledDataSheet(headers, snapshot.sources.bank.movements.map(snapshotMovementEditorExportRow), { fill: "E9F5ED", numericColumns: [3, 4] }), "Movimientos caja o banco");
+    if ((snapshot.movementEditLog || []).length) appendSheet(workbook, createStyledDataSheet(["Acción", "Fecha y hora", "Cuenta origen", "Cuenta destino", "Origen anterior", "Origen nuevo", "ID anterior", "ID nuevo", "Fecha anterior", "Fecha nueva", "Descripción anterior", "Descripción nueva", "Tipo anterior", "Tipo nuevo", "Importe anterior", "Importe nuevo", "Conciliaciones deshechas"], snapshot.movementEditLog.map(movementEditExportRow), { fill: "F3F0EB", numericColumns: [14, 15, 16] }), "Ediciones de movimientos");
+    appendSheet(workbook, createApplicationStateSheet(snapshot), STATE_SHEET_NAME);
+    hideWorkbookSheet(workbook, STATE_SHEET_NAME);
+    const output = XLSX.write(workbook, { compression: true, bookType: "xlsx", type: "array", cellStyles: true });
+    downloadBlob(new Blob([output], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), normalizeExportFileName(snapshotWorkspaceName(snapshot)));
+    showToast("Cuenta descargada", "El archivo conserva el estado corregido y puede volver a abrirse en ConciliApp.", "success");
+  } catch (error) {
+    console.error(error);
+    showToast("No se pudo descargar", error.message || "No fue posible generar el archivo.", "error");
+  }
 }
 
 function openRetryDialog() {
@@ -4472,7 +5066,9 @@ function createStateSnapshot() {
     rawValues: Array.isArray(movement.rawValues) ? movement.rawValues : [],
     transferOriginId: movement.transferOriginId || "",
     transferOriginAccount: movement.transferOriginAccount || "",
-    transferHistory: Array.isArray(movement.transferHistory) ? movement.transferHistory : []
+    transferHistory: Array.isArray(movement.transferHistory) ? movement.transferHistory : [],
+    editedAt: movement.editedAt instanceof Date ? movement.editedAt.toISOString() : movement.editedAt || "",
+    editHistory: Array.isArray(movement.editHistory) ? movement.editHistory : []
   });
   const serializeSource = source => ({
     key: source.key,
@@ -4527,6 +5123,7 @@ function createStateSnapshot() {
       name: getCurrentWorkspaceName()
     },
     transferLog: (state.transferLog || []).map(item => ({ ...item, at: item.at instanceof Date ? item.at.toISOString() : item.at })),
+    movementEditLog: (state.movementEditLog || []).map(item => ({ ...item, at: item.at instanceof Date ? item.at.toISOString() : item.at })),
     exportFileName: document.getElementById("exportFileName")?.value.trim() || "",
     config: { ...state.config },
     sources: {
@@ -4575,7 +5172,9 @@ function restoreStateSnapshot(snapshot) {
   state.config = { ...DEFAULT_CONFIG, ...(snapshot.config || {}) };
   state.workspace = createWorkspaceState(snapshot.workspace?.id, snapshot.workspace?.name || snapshot.exportFileName || "");
   state.accountTransfer = createAccountTransferState();
+  state.movementEditor = createMovementEditorState();
   state.transferLog = (snapshot.transferLog || []).map(item => ({ ...item, at: reviveStoredDate(item.at) || item.at }));
+  state.movementEditLog = (snapshot.movementEditLog || []).map(item => ({ ...item, at: reviveStoredDate(item.at) || item.at }));
   const restoreSource = (sourceKey, label) => {
     const saved = snapshot.sources?.[sourceKey] || {};
     const movements = (saved.movements || []).map(item => ({ ...item, date: reviveStoredDate(item.date) }));
@@ -4947,6 +5546,11 @@ function exportWorkbook() {
       const transferHeaders = ["Dirección", "Fecha y hora", "Cuenta origen", "Cuenta destino", "Origen del movimiento", "Fila original", "Fecha del movimiento", "Descripción", "Tipo original", "Tipo en destino", "Débito", "Crédito", "ID original", "ID en destino"];
       const transferRows = state.transferLog.map(transferExportRow);
       appendSheet(workbook, createStyledDataSheet(transferHeaders, transferRows, { fill: "EDF5FA", numericColumns: [10, 11] }), "Movimientos transferidos");
+    }
+
+    if ((state.movementEditLog || []).length) {
+      const editHeaders = ["Acción", "Fecha y hora", "Cuenta origen", "Cuenta destino", "Origen anterior", "Origen nuevo", "ID anterior", "ID nuevo", "Fecha anterior", "Fecha nueva", "Descripción anterior", "Descripción nueva", "Tipo anterior", "Tipo nuevo", "Importe anterior", "Importe nuevo", "Conciliaciones deshechas"];
+      appendSheet(workbook, createStyledDataSheet(editHeaders, state.movementEditLog.map(movementEditExportRow), { fill: "F3F0EB", numericColumns: [14, 15, 16] }), "Ediciones de movimientos");
     }
 
     if (summary.excludedCount) {
@@ -5350,6 +5954,10 @@ window.ReconciliationApp = Object.freeze({
   snapshotPendingMovements,
   applyTransferTargetType,
   moveSnapshotMovement,
+  invalidateSnapshotMovementReconciliations,
+  editMovementAcrossSnapshots,
+  deleteMovementAcrossSnapshots,
+  createEmptyMovementSnapshot,
   persistSnapshot,
   readPersistedSnapshot,
   readSavedWorkspaceSnapshots,

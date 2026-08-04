@@ -701,3 +701,110 @@ p { color: var(--muted); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* Editor independiente de movimientos y cuentas */
+.movement-editor-dialog { width: 100vw; max-width: none; height: 100vh; max-height: none; padding: 14px; }
+.movement-editor-card { width: min(1460px, calc(100vw - 28px)); height: min(930px, calc(100vh - 28px)); max-height: calc(100vh - 28px); overflow: hidden; }
+.movement-editor-header { flex: 0 0 auto; }
+.movement-editor-loader {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(150px, auto) minmax(135px, auto) minmax(210px, .85fr) minmax(125px, auto);
+  align-items: end;
+  gap: 10px;
+  padding: 14px 22px;
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--line);
+}
+.movement-editor-loader .button { width: 100%; min-width: 0; height: 39px; justify-content: center; white-space: nowrap; }
+.movement-editor-toolbar {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(190px, auto) minmax(190px, auto);
+  align-items: end;
+  gap: 10px;
+  padding: 12px 22px;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}
+.movement-editor-toolbar .search-field { min-height: 39px; }
+.movement-editor-layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); min-height: 0; flex: 1 1 auto; overflow: hidden; background: #f8fafa; }
+.movement-editor-accounts { min-width: 0; padding: 14px; overflow-y: auto; border-right: 1px solid var(--line); background: #fff; }
+.movement-editor-account-list { display: grid; gap: 8px; }
+.movement-editor-account {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  width: 100%;
+  min-height: 68px;
+  padding: 10px 11px;
+  text-align: left;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.movement-editor-account:hover { border-color: var(--line-strong); background: var(--surface-muted); }
+.movement-editor-account.active { border-color: var(--primary); box-shadow: inset 3px 0 0 var(--primary); background: var(--primary-soft); }
+.movement-editor-account strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.movement-editor-account span { align-self: start; color: var(--muted); font-size: 10px; }
+.movement-editor-account small { grid-column: 1 / -1; color: var(--muted); font-size: 9px; }
+.movement-editor-empty-accounts { display: grid; min-height: 250px; place-items: center; padding: 24px; color: var(--muted); text-align: center; border: 1px dashed var(--line-strong); border-radius: 6px; }
+.movement-editor-content { min-width: 0; min-height: 0; padding: 14px; overflow: auto; }
+.movement-editor-placeholder { display: grid; min-height: 360px; place-items: center; padding: 40px; color: var(--muted); text-align: center; border: 1px dashed var(--line-strong); border-radius: 6px; background: #fff; }
+.movement-editor-account-heading { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.movement-editor-account-heading > div { min-width: 0; }
+.movement-editor-account-heading h3 { margin: 0; font-size: 16px; }
+.movement-editor-account-heading p { margin: 3px 0 0; color: var(--muted); font-size: 10px; }
+.movement-editor-rename { display: grid; grid-template-columns: minmax(160px, 240px) auto; gap: 7px; align-items: end; }
+.movement-editor-rename input { height: 36px; }
+.movement-editor-rename .button { height: 36px; }
+.movement-editor-table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.movement-editor-table { width: 100%; min-width: 880px; border-collapse: collapse; table-layout: fixed; }
+.movement-editor-table th { position: sticky; top: 0; z-index: 2; padding: 8px 9px; color: var(--muted); background: var(--surface-muted); border-bottom: 1px solid var(--line); font-size: 9px; letter-spacing: .035em; text-align: left; text-transform: uppercase; }
+.movement-editor-table td { padding: 8px 9px; border-bottom: 1px solid #edf0f0; vertical-align: middle; font-size: 10px; }
+.movement-editor-table tr:last-child td { border-bottom: 0; }
+.movement-editor-table tr:hover td { background: #fbfcfc; }
+.movement-editor-table .movement-editor-description { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 650; }
+.movement-editor-table .amount { text-align: right; font-variant-numeric: tabular-nums; }
+.movement-editor-table .movement-editor-actions { text-align: right; }
+.movement-editor-table .movement-editor-actions .button { width: 100%; min-width: 72px; justify-content: center; }
+.movement-editor-source-badge, .movement-editor-state-badge { display: inline-flex; align-items: center; min-height: 22px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: #fff; font-size: 9px; font-weight: 700; white-space: nowrap; }
+.movement-editor-state-badge.reconciled { color: var(--green); background: var(--green-soft); border-color: var(--green-line); }
+.movement-editor-state-badge.possible { color: var(--yellow); background: var(--yellow-soft); border-color: var(--yellow-line); }
+.movement-editor-pagination { flex: 0 0 auto; min-height: 44px; padding: 8px 22px; background: #f8fafa; border-top: 1px solid var(--line); }
+.movement-editor-footer { display: grid; grid-template-columns: minmax(110px, .65fr) minmax(180px, 1fr) minmax(160px, 1fr) minmax(220px, 1.15fr); flex: 0 0 auto; }
+.movement-editor-footer .button { width: 100%; min-width: 0; justify-content: center; white-space: nowrap; }
+.movement-edit-card { width: min(780px, calc(100vw - 28px)); }
+.movement-edit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 18px 22px; }
+.movement-edit-grid .full { grid-column: 1 / -1; }
+.movement-edit-actions { display: grid; grid-template-columns: minmax(120px, auto) 1fr minmax(110px, auto) minmax(150px, auto); }
+.movement-edit-actions .button { width: 100%; justify-content: center; }
+#movementEditWarning { margin: 14px 22px 0; }
+
+@media (max-width: 1100px) {
+  .movement-editor-loader { grid-template-columns: minmax(0, 1fr) minmax(150px, auto) minmax(135px, auto); }
+  .movement-editor-new-account { grid-column: 1 / 3; }
+  .movement-editor-layout { grid-template-columns: 230px minmax(0, 1fr); }
+}
+
+@media (max-width: 820px) {
+  .movement-editor-dialog { padding: 0; }
+  .movement-editor-card { width: 100vw; height: 100vh; max-height: 100vh; border-radius: 0; }
+  .movement-editor-loader { grid-template-columns: 1fr 1fr; }
+  .movement-editor-loader > .field:first-child { grid-column: 1 / -1; }
+  .movement-editor-new-account { grid-column: 1; }
+  .movement-editor-toolbar { grid-template-columns: 1fr 1fr; }
+  .movement-editor-toolbar .search-field { grid-column: 1 / -1; }
+  .movement-editor-layout { grid-template-columns: 1fr; overflow: auto; }
+  .movement-editor-accounts { max-height: 180px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .movement-editor-account-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .movement-editor-content { overflow: visible; }
+  .movement-editor-footer { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 560px) {
+  .movement-editor-loader, .movement-editor-toolbar, .movement-editor-footer, .movement-edit-grid, .movement-edit-actions { grid-template-columns: 1fr; }
+  .movement-editor-loader > .field:first-child, .movement-editor-new-account, .movement-editor-toolbar .search-field, .movement-edit-grid .full { grid-column: 1; }
+  .movement-editor-account-list { grid-template-columns: 1fr; }
+  .movement-editor-account-heading { align-items: stretch; flex-direction: column; }
+  .movement-editor-rename { grid-template-columns: 1fr; }
+  .movement-edit-actions > span { display: none; }
+}

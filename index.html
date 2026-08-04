@@ -7,10 +7,10 @@
   <meta name="description" content="Herramienta local para conciliación de movimientos contables, de caja y banco.">
   <title>Conciliación contable</title>
   <link rel="icon" href="favicon.png" type="image/png">
-  <link rel="stylesheet" href="styles.css?v=20260804-1">
+  <link rel="stylesheet" href="styles.css?v=20260804-3">
   <script defer src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script defer src="app.js?v=20260804-1"></script>
+  <script defer src="app.js?v=20260804-3"></script>
 </head>
 <body>
   <header class="app-header">
@@ -24,6 +24,9 @@
     <div class="header-actions">
       <a class="hub-link" href="https://andresgonzalez.netlify.app/" title="Volver al inicio" aria-label="Volver al hub inicial"><i data-lucide="layout-grid"></i><span>Inicio</span></a>
       <span class="privacy-chip" title="Los datos permanecen en este navegador"><i data-lucide="hard-drive"></i><span id="localSaveStatus">Guardado local automático</span></span>
+      <button id="headerMovementEditorBtn" class="button button-ghost button-small" type="button">
+        <i data-lucide="table-pen"></i> Editor de movimientos
+      </button>
       <button id="newReconciliationBtn" class="button button-ghost button-small" type="button">
         <i data-lucide="rotate-ccw"></i> Nueva conciliación
       </button>
@@ -56,6 +59,7 @@
             </div>
             <div class="button-row">
               <button id="startBtn" class="button button-primary" type="button">Comenzar conciliación <i data-lucide="arrow-right"></i></button>
+              <button id="openMovementEditorBtn" class="button button-secondary" type="button"><i data-lucide="table-pen"></i> Editar movimientos y cuentas</button>
               <button id="resumeReconciliationBtn" class="button button-secondary" type="button"><i data-lucide="folder-up"></i> Continuar conciliación anterior</button>
               <input id="resumeReconciliationInput" type="file" accept=".xlsx" hidden>
               <button class="button button-secondary" type="button" data-open-formats><i data-lucide="table-properties"></i> Ver formatos admitidos</button>
@@ -222,7 +226,6 @@
           <label class="field inline"><span>Orden</span><select id="sortResults"><option value="score-desc">Mayor confianza</option><option value="score-asc">Menor confianza</option><option value="date-desc">Fecha más reciente</option><option value="date-asc">Fecha más antigua</option><option value="difference-desc">Mayor diferencia</option></select></label>
           <button id="retryPendingBtn" class="button button-secondary button-small hidden" type="button" title="Configurar una búsqueda adicional sólo sobre los movimientos pendientes"><i data-lucide="scan-search"></i> Búsqueda avanzada</button>
           <button id="trimPeriodBtn" class="button button-secondary button-small hidden" type="button" title="Excluir temporalmente pendientes fuera de un rango de fechas"><i data-lucide="calendar-range"></i> Recortar período</button>
-          <button id="manageAccountsBtn" class="button button-secondary button-small" type="button" title="Mover movimientos pendientes entre conciliaciones"><i data-lucide="arrow-left-right"></i> Mover entre cuentas</button>
           <button id="approveAllPossibleBtn" class="button button-secondary button-small hidden" type="button"><i data-lucide="check-check"></i> Aprobar filtrados</button>
           <button id="rejectAllPossibleBtn" class="button button-danger button-small hidden" type="button"><i data-lucide="x-circle"></i> Rechazar filtrados</button>
         </div>
@@ -240,7 +243,7 @@
             <button id="downloadExcelBtn" class="button button-primary button-large" type="button"><i data-lucide="download"></i> Descargar resultado en Excel</button>
             <p class="local-reminder"><i data-lucide="shield-check"></i> El archivo se genera localmente en este navegador.</p>
           </div>
-          <aside class="sheet-list"><h2>Hojas incluidas</h2><ol><li>Resumen</li><li>Conciliaciones</li><li>Posibles conciliaciones</li><li>Pendientes del sistema</li><li>Pendientes de caja o banco</li><li>Movimientos transferidos, si existen</li><li>Excluidos por período, si existen</li><li>Datos originales del sistema</li><li>Datos originales de caja o banco</li><li>Errores de importación, si existen</li></ol></aside>
+          <aside class="sheet-list"><h2>Hojas incluidas</h2><ol><li>Resumen</li><li>Conciliaciones</li><li>Posibles conciliaciones</li><li>Pendientes del sistema</li><li>Pendientes de caja o banco</li><li>Movimientos transferidos, si existen</li><li>Ediciones de movimientos, si existen</li><li>Excluidos por período, si existen</li><li>Datos originales del sistema</li><li>Datos originales de caja o banco</li><li>Errores de importación, si existen</li></ol></aside>
         </div>
         <div class="step-actions"><button class="button button-secondary" data-go-step="6" type="button"><i data-lucide="arrow-left"></i> Volver a revisión</button><button id="finishNewBtn" class="button button-quiet" type="button"><i data-lucide="rotate-ccw"></i> Iniciar otra conciliación</button></div>
       </section>
@@ -323,6 +326,62 @@
         <button id="openDestinationAccountBtn" class="button button-primary" type="button"><i data-lucide="folder-input"></i><span>Guardar y abrir destino</span></button>
       </div>
     </div>
+  </dialog>
+
+
+  <dialog id="movementEditorDialog" class="modal modal-extra-wide movement-editor-dialog">
+    <div class="modal-card movement-editor-card">
+      <div class="modal-header movement-editor-header">
+        <div><h2>Editor de movimientos y cuentas</h2><p>Corrija los datos antes de conciliar. Puede cambiar cuenta, origen, fecha, descripción, importe y débito/crédito.</p></div>
+        <button class="icon-button" data-close-movement-editor type="button" aria-label="Cerrar"><i data-lucide="x"></i></button>
+      </div>
+      <div class="movement-editor-loader">
+        <label class="field"><span>Cuenta guardada</span><select id="movementEditorSavedSelect"><option value="">Seleccione una cuenta local</option></select></label>
+        <button id="addSavedMovementAccountBtn" class="button button-secondary" type="button"><i data-lucide="folder-plus"></i> Agregar guardada</button>
+        <button id="addMovementAccountFilesBtn" class="button button-secondary" type="button"><i data-lucide="files"></i> Agregar XLSX</button>
+        <input id="movementEditorFilesInput" type="file" accept=".xlsx" multiple hidden>
+        <label class="field movement-editor-new-account"><span>Nueva cuenta vacía</span><input id="newMovementAccountName" type="text" maxlength="80" placeholder="Ej.: ITAU $"></label>
+        <button id="createMovementAccountBtn" class="button button-secondary" type="button"><i data-lucide="plus"></i> Crear cuenta</button>
+      </div>
+      <div class="movement-editor-toolbar">
+        <label class="search-field"><i data-lucide="search"></i><input id="movementEditorSearch" type="search" placeholder="Buscar fecha, descripción, importe o ID"></label>
+        <label class="field inline"><span>Origen</span><select id="movementEditorSourceFilter"><option value="all">Todos</option><option value="system">Sistema contable</option><option value="bank">Caja o banco</option></select></label>
+        <label class="field inline"><span>Mostrar</span><select id="movementEditorStatusFilter"><option value="all">Todos</option><option value="pending">Pendientes</option><option value="reconciled">Conciliados o posibles</option></select></label>
+      </div>
+      <div class="movement-editor-layout">
+        <aside id="movementEditorAccounts" class="movement-editor-accounts"></aside>
+        <section id="movementEditorContent" class="movement-editor-content"></section>
+      </div>
+      <div id="movementEditorPagination" class="pagination movement-editor-pagination"></div>
+      <div class="modal-actions movement-editor-footer">
+        <button class="button button-secondary" data-close-movement-editor type="button">Cerrar</button>
+        <button id="downloadMovementAccountBtn" class="button button-secondary" type="button"><i data-lucide="download"></i> Descargar seleccionada</button>
+        <button id="saveMovementAccountsBtn" class="button button-secondary" type="button"><i data-lucide="save"></i> Guardar todas</button>
+        <button id="openSelectedMovementAccountBtn" class="button button-primary" type="button"><i data-lucide="folder-input"></i> Guardar y abrir seleccionada</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="movementEditDialog" class="modal">
+    <form id="movementEditForm" class="modal-card movement-edit-card">
+      <div class="modal-header"><div><h2>Editar movimiento</h2><p>El importe se escribe siempre en valor absoluto; el selector define si queda como débito o crédito.</p></div><button class="icon-button" data-close-movement-edit type="button" aria-label="Cerrar"><i data-lucide="x"></i></button></div>
+      <div id="movementEditWarning" class="inline-warning hidden"></div>
+      <div class="movement-edit-grid">
+        <label class="field"><span>Cuenta</span><select name="accountId" required></select></label>
+        <label class="field"><span>Origen dentro de la cuenta</span><select name="sourceKey" required><option value="system">Sistema contable</option><option value="bank">Caja o banco</option></select></label>
+        <label class="field"><span>Fecha</span><input name="date" type="date" required></label>
+        <label class="field"><span>Tipo</span><select name="type" required><option value="debit">Débito</option><option value="credit">Crédito</option></select></label>
+        <label class="field"><span>Importe absoluto</span><input name="amount" type="number" min="0.01" step="0.01" required></label>
+        <label class="field"><span>Estado original <small>opcional</small></span><input name="status" type="text" maxlength="80"></label>
+        <label class="field full"><span>Descripción</span><input name="description" type="text" maxlength="500" required></label>
+      </div>
+      <div class="modal-actions movement-edit-actions">
+        <button id="deleteMovementBtn" class="button button-danger" type="button"><i data-lucide="trash-2"></i> Eliminar</button>
+        <span></span>
+        <button class="button button-secondary" data-close-movement-edit type="button">Cancelar</button>
+        <button class="button button-primary" type="submit"><i data-lucide="save"></i> Aplicar cambios</button>
+      </div>
+    </form>
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>

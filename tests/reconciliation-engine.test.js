@@ -133,5 +133,63 @@ const mov = (id, source, date, description, amount) => ({ id, source, row: 1, da
   assert.equal(app.moveSnapshotMovement(snapshotC, snapshotD, 'system', 'system-credit', 'credit'), false, 'same movement transferred twice');
   assert.equal(snapshotD.sources.system.movements.length, 1);
 
+  const editorCaja = {
+    schemaVersion: 1,
+    workspace: { id: 'editor-caja', name: 'Caja pesos' },
+    exportFileName: 'Caja pesos',
+    sources: {
+      system: { movements: [{ id:'system-ute', source:'system', row:47, date:'2026-07-17T00:00:00.000Z', dateKey:'2026-07-17', description:'Recibo P UTE', amount:287227.43, debitAmount:287227.43, creditAmount:0, type:'debit', status:'' }] },
+      bank: { movements: [] }
+    },
+    results: { reconciliations: [{ id:'CON-UTE', status:'confirmed', systemIds:['system-ute'], bankIds:[] }] },
+    review: { periodFilter: { from:'', to:'' } },
+    transferLog: [],
+    movementEditLog: []
+  };
+  const editorItau = {
+    schemaVersion: 1,
+    workspace: { id: 'editor-itau', name: 'ITAU pesos' },
+    exportFileName: 'ITAU pesos',
+    sources: { system: { movements: [] }, bank: { movements: [] } },
+    results: { reconciliations: [] },
+    review: { periodFilter: { from:'', to:'' } },
+    transferLog: [],
+    movementEditLog: []
+  };
+  const editedMove = app.editMovementAcrossSnapshots([editorCaja, editorItau], {
+    accountId: 'editor-caja', sourceKey: 'system', movementId: 'system-ute'
+  }, {
+    accountId: 'editor-itau', sourceKey: 'bank', date: '2026-07-18', description: 'UTE corregido', amount: 300000, type: 'credit', status: 'ajustado'
+  });
+  assert.equal(editorCaja.sources.system.movements.length, 0, 'editor did not remove from origin');
+  assert.equal(editorCaja.results.reconciliations.length, 0, 'related reconciliation was not invalidated');
+  assert.equal(editedMove.invalidated, 1, 'invalidated count mismatch');
+  const editedUte = editorItau.sources.bank.movements[0];
+  assert.equal(editedUte.amount, -300000, 'credit sign not applied');
+  assert.equal(editedUte.debitAmount, 0, 'credit kept debit value');
+  assert.equal(editedUte.creditAmount, 300000, 'credit column not set');
+  assert.equal(editedUte.type, 'credit', 'credit type not set');
+  assert.equal(editedUte.description, 'UTE corregido');
+  assert.equal(editedUte.dateKey, '2026-07-18');
+  assert.equal(editedUte.source, 'bank');
+  assert.equal(editorCaja.movementEditLog[0].action, 'move');
+  assert.equal(editorItau.transferLog[0].destinationType, 'credit');
+
+  const sameAccountEdit = app.editMovementAcrossSnapshots([editorItau], {
+    accountId: 'editor-itau', sourceKey: 'bank', movementId: editedUte.id
+  }, {
+    accountId: 'editor-itau', sourceKey: 'bank', date: '2026-07-19', description: 'UTE débito corregido', amount: 1500.5, type: 'debit', status: ''
+  });
+  assert.equal(sameAccountEdit.movement.amount, 1500.5, 'debit sign not applied');
+  assert.equal(sameAccountEdit.movement.debitAmount, 1500.5);
+  assert.equal(sameAccountEdit.movement.creditAmount, 0);
+  assert.equal(sameAccountEdit.movement.type, 'debit');
+
+  const deleted = app.deleteMovementAcrossSnapshots([editorItau], {
+    accountId: 'editor-itau', sourceKey: 'bank', movementId: sameAccountEdit.movement.id
+  });
+  assert.equal(editorItau.sources.bank.movements.length, 0, 'editor delete failed');
+  assert.equal(deleted.movement.description, 'UTE débito corregido');
+
   console.log('All tests passed');
 })().catch(err => { console.error(err); process.exit(1); });
