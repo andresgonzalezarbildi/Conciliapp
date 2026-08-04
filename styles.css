@@ -551,8 +551,9 @@ p { color: var(--muted); }
 
 .modal-extra-wide { width: min(1220px, calc(100vw - 24px)); }
 .account-transfer-card { width: min(1180px, calc(100vw - 28px)); max-height: min(900px, calc(100vh - 28px)); overflow: hidden; }
-.account-transfer-loader { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto auto; align-items: end; gap: 10px; padding: 16px 22px; border-bottom: 1px solid var(--line); background: var(--surface-muted); }
-.account-loader-separator { align-self: center; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.account-transfer-loader { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(155px, auto) 34px minmax(210px, auto); align-items: end; gap: 10px; padding: 16px 22px; border-bottom: 1px solid var(--line); background: var(--surface-muted); }
+.account-transfer-loader .button { min-width: 0; height: 39px; white-space: nowrap; }
+.account-loader-separator { display: grid; width: 34px; height: 39px; align-self: end; place-items: center; color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; }
 .account-transfer-content { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; min-height: 360px; max-height: 58vh; padding: 16px 22px; overflow: auto; background: #f8fafa; }
 .account-transfer-placeholder { grid-column: 1 / -1; display: grid; place-items: center; min-height: 330px; padding: 34px; color: var(--muted); text-align: center; border: 1px dashed var(--line-strong); border-radius: 7px; background: white; }
 .account-panel { min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 7px; background: white; }
@@ -567,20 +568,29 @@ p { color: var(--muted); }
 .account-movement-group-heading strong { font-size: 10px; letter-spacing: .035em; text-transform: uppercase; }
 .account-movement-group-heading span { color: var(--muted); font-size: 10px; }
 .account-movement-list { display: grid; max-height: 230px; overflow: auto; }
-.account-movement-row { display: grid; grid-template-columns: 24px 76px minmax(0, 1fr) 112px; align-items: center; gap: 7px; padding: 7px 8px; border-bottom: 1px solid #edf0f0; cursor: grab; }
+.account-movement-row { display: grid; grid-template-columns: 22px 68px minmax(120px, 1fr) 104px 112px; align-items: center; gap: 8px; min-height: 58px; padding: 7px 8px; border-bottom: 1px solid #edf0f0; cursor: grab; }
 .account-movement-row:last-child { border-bottom: 0; }
 .account-movement-row:hover, .account-movement-row.selected { background: #f0f6f6; }
 .account-movement-row.dragging { opacity: .45; }
 .account-movement-row small { color: var(--muted); font-size: 9px; }
 .account-movement-description { display: grid; min-width: 0; gap: 2px; overflow: hidden; font-size: 11px; }
 .account-movement-description > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.movement-current-type { color: var(--muted); font-size: 9px !important; font-weight: 650; }
 .cross-account-suggested { box-shadow: inset 3px 0 0 #c69a26; }
 .cross-account-match { display: inline-flex; align-items: center; gap: 3px; width: max-content; color: #8a6412; font-size: 9px; font-style: normal; font-weight: 700; }
 .cross-account-match svg { width: 11px; height: 11px; }
 .account-movement-amount { text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; }
+.account-target-type { display: grid; min-width: 0; gap: 3px; cursor: default; }
+.account-target-type span { color: var(--muted); font-size: 8px; font-weight: 750; letter-spacing: .035em; text-transform: uppercase; }
+.account-target-type select { width: 100%; min-width: 0; height: 30px; padding: 3px 24px 3px 7px; background: white; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--ink); font-size: 10px; font-weight: 650; }
+.account-target-type select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(22, 78, 85, .10); outline: 0; }
 .account-empty-group { padding: 18px 10px; color: var(--muted); text-align: center; font-size: 10px; }
-.account-transfer-actions { display: flex; justify-content: center; gap: 10px; padding: 0 22px 15px; background: #f8fafa; }
-.transfer-history-note { grid-column: 1 / -1; padding: 8px 10px; color: var(--blue); background: #edf5fa; border: 1px solid #cbdfea; border-radius: 5px; font-size: 10px; }
+.account-transfer-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; padding: 0 22px 15px; background: #f8fafa; }
+.account-direction-button { width: 100%; min-height: 42px; }
+.account-transfer-footer { display: grid; grid-template-columns: minmax(110px, .65fr) minmax(180px, 1fr) minmax(190px, 1fr); }
+.account-transfer-footer .button { width: 100%; min-width: 0; white-space: nowrap; }
+.transfer-history-note { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: 7px; padding: 9px 11px; color: var(--blue); background: #edf5fa; border: 1px solid #cbdfea; border-radius: 5px; font-size: 10px; }
+.transfer-history-note svg { flex: 0 0 auto; width: 14px; height: 14px; }
 
 .toast-region { position: fixed; top: 66px; right: 10px; z-index: 100; display: grid; width: min(300px, calc(100vw - 20px)); gap: 6px; }
 .toast { display: flex; align-items: flex-start; gap: 7px; padding: 8px 10px; background: #23383b; color: white; border-radius: 5px; box-shadow: 0 5px 15px rgba(18, 31, 33, .18); animation: toast-in .18s ease-out; }
@@ -634,8 +644,9 @@ p { color: var(--muted); }
   .summary-cards { grid-template-columns: repeat(3, 1fr); }
   .detail-summary { grid-template-columns: repeat(2, 1fr); }
   .proposal-review-actions .button { flex: 1 1 auto; }
-  .account-transfer-loader { grid-template-columns: 1fr 1fr; }
+  .account-transfer-loader { grid-template-columns: minmax(0, 1fr) minmax(150px, auto); }
   .account-loader-separator { display: none; }
+  .account-transfer-loader > #loadAccountTransferBtn { grid-column: 1 / -1; width: 100%; }
   .account-transfer-content { grid-template-columns: 1fr; max-height: 62vh; }
   .reason-list, .detail-summary { grid-column: 1; }
   .export-main { padding: 32px 22px; }
@@ -678,10 +689,13 @@ p { color: var(--muted); }
   .result-table .result-row td:nth-child(9) { grid-column: 1; }
   .account-transfer-loader { grid-template-columns: 1fr; }
   .account-transfer-loader .button { width: 100%; }
-  .account-transfer-actions { flex-direction: column; }
-  .account-transfer-actions .button { width: 100%; }
-  .account-movement-row { grid-template-columns: 24px 64px minmax(0, 1fr); }
-  .account-movement-amount { grid-column: 2 / -1; }
+  .account-transfer-loader > #loadAccountTransferBtn { grid-column: 1; }
+  .account-transfer-actions, .account-transfer-footer { grid-template-columns: 1fr; }
+  .account-transfer-actions .button, .account-transfer-footer .button { width: 100%; }
+  .account-movement-row { grid-template-columns: 22px 62px minmax(0, 1fr) 104px; }
+  .account-movement-description { grid-column: 3 / -1; }
+  .account-movement-amount { grid-column: 2 / 4; text-align: left; }
+  .account-target-type { grid-column: 4; }
 }
 
 @media (prefers-reduced-motion: reduce) {

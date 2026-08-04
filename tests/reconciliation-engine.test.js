@@ -103,5 +103,35 @@ const mov = (id, source, date, description, amount) => ({ id, source, row: 1, da
   assert.equal(snapshotB.sources.system.movements[0].transferOriginAccount, 'Caja pesos');
   assert.notEqual(snapshotB.sources.system.movements[0].id, 'system-1');
 
+  const snapshotC = {
+    schemaVersion: 1,
+    exportFileName: 'Caja dólares',
+    workspace: { id: 'c', name: 'Caja dólares' },
+    sources: {
+      system: { movements: [{ id:'system-credit', source:'system', row:9, date:'2026-07-18T00:00:00.000Z', dateKey:'2026-07-18', description:'Movimiento invertido', amount:500, debitAmount:500, creditAmount:0, type:'debit', status:'' }] },
+      bank: { movements: [] }
+    },
+    results: { reconciliations: [] },
+    review: { periodFilter: { from:'', to:'' } }
+  };
+  const snapshotD = {
+    schemaVersion: 1,
+    exportFileName: 'Itau dólares',
+    workspace: { id: 'd', name: 'Itau dólares' },
+    sources: { system: { movements: [] }, bank: { movements: [] } },
+    results: { reconciliations: [] },
+    review: { periodFilter: { from:'', to:'' } }
+  };
+  assert(app.moveSnapshotMovement(snapshotC, snapshotD, 'system', 'system-credit', 'credit'), 'typed transfer failed');
+  const transferred = snapshotD.sources.system.movements[0];
+  assert.equal(transferred.type, 'credit');
+  assert.equal(transferred.amount, -500);
+  assert.equal(transferred.debitAmount, 0);
+  assert.equal(transferred.creditAmount, 500);
+  assert.equal(snapshotC.transferLog[0].originalType, 'debit');
+  assert.equal(snapshotD.transferLog[0].destinationType, 'credit');
+  assert.equal(app.moveSnapshotMovement(snapshotC, snapshotD, 'system', 'system-credit', 'credit'), false, 'same movement transferred twice');
+  assert.equal(snapshotD.sources.system.movements.length, 1);
+
   console.log('All tests passed');
 })().catch(err => { console.error(err); process.exit(1); });

@@ -302,7 +302,7 @@
   <dialog id="accountTransferDialog" class="modal modal-extra-wide">
     <div class="modal-card account-transfer-card">
       <div class="modal-header">
-        <div><h2>Mover movimientos entre cuentas</h2><p>Cargue otra conciliación y arrastre movimientos pendientes de una cuenta a la otra. Los movimientos conciliados deben deshacerse antes de poder moverlos.</p></div>
+        <div><h2>Mover movimientos entre cuentas</h2><p>Cargue otra conciliación, elija cómo debe quedar cada movimiento en la cuenta destino y muévalo. Los movimientos conciliados deben deshacerse antes.</p></div>
         <button class="icon-button" data-close-account-transfer type="button" aria-label="Cerrar"><i data-lucide="x"></i></button>
       </div>
       <div class="account-transfer-loader">
@@ -314,13 +314,13 @@
       </div>
       <div id="accountTransferContent" class="account-transfer-content"></div>
       <div class="account-transfer-actions">
-        <button id="moveToDestinationBtn" class="button button-secondary" type="button"><i data-lucide="arrow-right"></i> Mover seleccionados a destino</button>
-        <button id="moveToCurrentBtn" class="button button-secondary" type="button"><i data-lucide="arrow-left"></i> Mover seleccionados a actual</button>
+        <button id="moveToDestinationBtn" class="button button-secondary account-direction-button" type="button"><i data-lucide="arrow-right"></i><span>Mover seleccionados a destino</span></button>
+        <button id="moveToCurrentBtn" class="button button-secondary account-direction-button" type="button"><i data-lucide="arrow-left"></i><span>Mover seleccionados a actual</span></button>
       </div>
-      <div class="modal-actions">
+      <div class="modal-actions account-transfer-footer">
         <button class="button button-secondary" data-close-account-transfer type="button">Cerrar</button>
-        <button id="saveAccountTransfersBtn" class="button button-secondary" type="button"><i data-lucide="save"></i> Guardar ambas cuentas</button>
-        <button id="openDestinationAccountBtn" class="button button-primary" type="button"><i data-lucide="folder-input"></i> Guardar y abrir destino</button>
+        <button id="saveAccountTransfersBtn" class="button button-secondary" type="button"><i data-lucide="save"></i><span>Guardar ambas cuentas</span></button>
+        <button id="openDestinationAccountBtn" class="button button-primary" type="button"><i data-lucide="folder-input"></i><span>Guardar y abrir destino</span></button>
       </div>
     </div>
   </dialog>

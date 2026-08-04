@@ -33,3 +33,21 @@ The most difficult part was not reading an Excel file, but accepting spreadsheet
 I also learned that an accounting reconciliation should not treat an approximate match as a certainty. Separating confirmed, possible, and pending results — and explaining the score while allowing groups to be edited or removed — was just as important as the matching algorithm itself.
 
 Finally, working with thousands of transactions showed the difference between optimizing calculation time and improving the complete user experience. Estimating workload, keeping the interface responsive, supporting cancellation, preserving progress, and limiting combinations are all parts of the same problem.
+
+## Account workspaces and safer matching
+
+The reconciliation engine now resolves repeated one-to-one amounts as a global assignment instead of accepting the first compatible pair. This gives description, numeric references, and date coherence enough weight to avoid swapped matches when several transactions share the same amount.
+
+Mixed-sign groups and internal debit/credit offsets are disabled by default. If enabled, mixed-sign groups stay under manual review, and an internal offset can only be auto-confirmed when there is strong reversal evidence such as a shared reference or wording related to a return, reversal, or cancellation.
+
+From the review screen, **Mover entre cuentas** can load another exported reconciliation or a locally saved account. Pending movements can be selected or dragged between accounts. The transfer preserves the original row and movement ID as audit metadata, stores both account states locally, and adds a **Movimientos transferidos** sheet to later exports.
+
+Run the regression tests with:
+
+```bash
+npm test
+```
+## Traslado entre cuentas
+
+La ventana **Mover entre cuentas** permite cargar otra conciliación y trasladar movimientos pendientes mediante selección o arrastrar y soltar. Antes de mover cada fila puede elegirse cómo debe quedar en la cuenta receptora: **Mantener**, **Débito** o **Crédito**. El cambio conserva el tipo original y el tipo aplicado en la hoja **Movimientos transferidos**.
+

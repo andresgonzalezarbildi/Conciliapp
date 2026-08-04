@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_BUILD = "2026.08.04-1";
+const APP_BUILD = "2026.08.04-2";
 const STATE_SCHEMA_VERSION = 1;
 const STATE_SHEET_NAME = "Estado ConciliApp";
 const STATE_CHUNK_SIZE = 30000;
@@ -106,6 +106,7 @@ function createAccountTransferState() {
     destinationSearch: "",
     selectedCurrent: new Set(),
     selectedDestination: new Set(),
+    typeOverrides: new Map(),
     dragPayload: null
   };
 }
@@ -1836,6 +1837,7 @@ async function loadSelectedSavedAccount() {
     state.accountTransfer.destinationSnapshot = normalizeTransferSnapshot(snapshot, "Cuenta destino");
     state.accountTransfer.destinationFileName = snapshotWorkspaceName(snapshot);
     state.accountTransfer.selectedDestination.clear();
+    state.accountTransfer.typeOverrides.clear();
     renderAccountTransferDialog();
   } catch (error) {
     console.error(error);
@@ -1860,6 +1862,7 @@ async function loadDestinationAccountFile(file) {
     state.accountTransfer.destinationSnapshot = snapshot;
     state.accountTransfer.destinationFileName = file.name.replace(/\.xlsx$/i, "");
     state.accountTransfer.selectedDestination.clear();
+    state.accountTransfer.typeOverrides.clear();
     renderAccountTransferDialog();
     showToast("Cuenta destino cargada", `${snapshotWorkspaceName(snapshot)} está disponible para mover pendientes.`, "success");
   } catch (error) {
@@ -1883,10 +1886,18 @@ function renderAccountTransferDialog() {
   if (!destination) {
     dom.accountTransferContent.innerHTML = `${renderAccountPanel("current", current, transfer.currentSearch)}<div class="account-transfer-placeholder"><div><strong>Cargue la conciliación de la otra cuenta</strong><p>Puede elegir una cuenta guardada localmente o un XLSX exportado. Después podrá arrastrar los movimientos pendientes.</p></div></div>`;
   } else {
-    dom.accountTransferContent.innerHTML = `${renderAccountPanel("current", current, transfer.currentSearch)}${renderAccountPanel("destination", destination, transfer.destinationSearch)}<div class="transfer-history-note">Al mover una fila se conserva su fecha, importe, descripción y número de fila original. La aplicación le asigna un ID nuevo en la cuenta destino y registra de qué cuenta provino.</div>`;
+    dom.accountTransferContent.innerHTML = `${renderAccountPanel("current", current, transfer.currentSearch)}${renderAccountPanel("destination", destination, transfer.destinationSearch)}<div class="transfer-history-note"><i data-lucide="info"></i><span>La opción <strong>En destino</strong> permite mantener el tipo actual o corregirlo a débito/crédito antes de mover. Se conserva la trazabilidad del valor original.</span></div>`;
   }
   bindAccountTransferContentEvents();
   refreshIcons(dom.accountTransferDialog);
+}
+
+function accountTransferMovementKey(origin, sourceKey, movementId) {
+  return `${origin}:${sourceKey}:${movementId}`;
+}
+
+function accountTransferTargetType(origin, sourceKey, movementId) {
+  return state.accountTransfer.typeOverrides.get(accountTransferMovementKey(origin, sourceKey, movementId)) || "keep";
 }
 
 function renderAccountPanel(origin, snapshot, search) {
@@ -1900,8 +1911,10 @@ function renderAccountPanel(origin, snapshot, search) {
       const key = `${sourceKey}:${item.id}`;
       const date = reviveStoredDate(item.date);
       const crossMatch = findCrossAccountMatch(item, otherSnapshot);
+      const targetType = accountTransferTargetType(origin, sourceKey, item.id);
+      const currentType = movementDebitCredit(item).debit > 0 ? "Débito" : "Crédito";
       const matchBadge = crossMatch ? `<em class="cross-account-match" title="Misma fecha e importe en ${escapeAttribute(snapshotWorkspaceName(otherSnapshot))}: ${escapeAttribute(crossMatch.candidate.description)}"><i data-lucide="badge-alert"></i> Posible otra cuenta</em>` : "";
-      return `<div class="account-movement-row ${selected.has(key) ? "selected" : ""} ${crossMatch ? "cross-account-suggested" : ""}" draggable="true" data-account-movement data-origin="${origin}" data-source="${sourceKey}" data-id="${escapeAttribute(item.id)}"><input type="checkbox" data-account-select value="${escapeAttribute(key)}" ${selected.has(key) ? "checked" : ""} aria-label="Seleccionar movimiento"><small>${date ? formatDate(date) : escapeHtml(item.dateKey || "")}</small><span class="account-movement-description" title="${escapeAttribute(item.description)}"><span>${escapeHtml(item.description)}</span>${matchBadge}</span><strong class="account-movement-amount ${Number(item.amount) < 0 ? "negative" : ""}">${formatMoney(Number(item.amount) || 0)}</strong></div>`;
+      return `<div class="account-movement-row ${selected.has(key) ? "selected" : ""} ${crossMatch ? "cross-account-suggested" : ""}" draggable="true" data-account-movement data-origin="${origin}" data-source="${sourceKey}" data-id="${escapeAttribute(item.id)}"><input type="checkbox" data-account-select value="${escapeAttribute(key)}" ${selected.has(key) ? "checked" : ""} aria-label="Seleccionar movimiento"><small>${date ? formatDate(date) : escapeHtml(item.dateKey || "")}</small><span class="account-movement-description" title="${escapeAttribute(item.description)}"><span>${escapeHtml(item.description)}</span><small class="movement-current-type">Actual: ${currentType}</small>${matchBadge}</span><strong class="account-movement-amount ${movementDebitCredit(item).credit > 0 ? "negative" : ""}">${formatMoney(Number(item.amount) || 0)}</strong><label class="account-target-type" title="Tipo que tendrá al pasar a la otra cuenta"><span>En destino</span><select data-account-transfer-type aria-label="Tipo en la cuenta destino"><option value="keep" ${targetType === "keep" ? "selected" : ""}>Mantener</option><option value="debit" ${targetType === "debit" ? "selected" : ""}>Débito</option><option value="credit" ${targetType === "credit" ? "selected" : ""}>Crédito</option></select></label></div>`;
     }).join("") : `<div class="account-empty-group">No hay pendientes para este filtro.</div>`;
     return `<section class="account-movement-group"><div class="account-movement-group-heading"><strong>${sourceKey === "system" ? "Sistema contable" : "Caja o banco"}</strong><span>${visible.length.toLocaleString("es-UY")} de ${all.length.toLocaleString("es-UY")}</span></div><div class="account-movement-list">${rows}</div></section>`;
   }).join("");
@@ -1920,15 +1933,27 @@ function bindAccountTransferContentEvents() {
       renderAccountTransferDialog();
     });
   });
+  dom.accountTransferContent.querySelectorAll("[data-account-transfer-type]").forEach(select => {
+    select.addEventListener("change", event => {
+      const row = event.target.closest("[data-account-movement]");
+      const key = accountTransferMovementKey(row.dataset.origin, row.dataset.source, row.dataset.id);
+      if (event.target.value === "keep") state.accountTransfer.typeOverrides.delete(key);
+      else state.accountTransfer.typeOverrides.set(key, event.target.value);
+    });
+  });
   dom.accountTransferContent.querySelectorAll("[data-account-movement]").forEach(row => {
     row.addEventListener("click", event => {
-      if (event.target.matches("input")) return;
+      if (event.target.closest("input, select, button, label")) return;
       const checkbox = row.querySelector("[data-account-select]");
       checkbox.checked = !checkbox.checked;
       checkbox.dispatchEvent(new Event("change", { bubbles: true }));
     });
     row.addEventListener("dragstart", event => {
-      const payload = { origin: row.dataset.origin, sourceKey: row.dataset.source, id: row.dataset.id };
+      if (event.target.closest("select, label")) {
+        event.preventDefault();
+        return;
+      }
+      const payload = { origin: row.dataset.origin, sourceKey: row.dataset.source, id: row.dataset.id, targetType: accountTransferTargetType(row.dataset.origin, row.dataset.source, row.dataset.id) };
       state.accountTransfer.dragPayload = payload;
       row.classList.add("dragging");
       event.dataTransfer.effectAllowed = "move";
@@ -1966,7 +1991,7 @@ function bindAccountTransferContentEvents() {
         try { payload = JSON.parse(event.dataTransfer.getData("text/plain")); } catch { payload = null; }
       }
       if (!payload || payload.origin === panel.dataset.accountDrop) return;
-      moveSingleAccountMovement(payload.origin, panel.dataset.accountDrop, payload.sourceKey, payload.id);
+      moveSingleAccountMovement(payload.origin, panel.dataset.accountDrop, payload.sourceKey, payload.id, payload.targetType || "keep");
     });
   });
 }
@@ -1979,7 +2004,20 @@ function transferredMovementId(destinationSnapshot, sourceKey) {
   return candidate;
 }
 
-function moveSnapshotMovement(originSnapshot, destinationSnapshot, sourceKey, movementId) {
+function applyTransferTargetType(movement, targetType = "keep") {
+  if (!["debit", "credit"].includes(targetType)) return { ...movement };
+  const amounts = movementDebitCredit(movement);
+  const magnitude = roundMoney(Math.max(amounts.debit, amounts.credit, Math.abs(Number(movement.amount) || 0)));
+  return {
+    ...movement,
+    amount: targetType === "debit" ? magnitude : -magnitude,
+    debitAmount: targetType === "debit" ? magnitude : 0,
+    creditAmount: targetType === "credit" ? magnitude : 0,
+    type: targetType
+  };
+}
+
+function moveSnapshotMovement(originSnapshot, destinationSnapshot, sourceKey, movementId, targetType = "keep") {
   if (!originSnapshot || !destinationSnapshot || !["system", "bank"].includes(sourceKey)) return false;
   const pendingIds = new Set(snapshotPendingMovements(originSnapshot, sourceKey).map(item => item.id));
   if (!pendingIds.has(movementId)) return false;
@@ -1990,15 +2028,18 @@ function moveSnapshotMovement(originSnapshot, destinationSnapshot, sourceKey, mo
   const fromName = snapshotWorkspaceName(originSnapshot);
   const toName = snapshotWorkspaceName(destinationSnapshot);
   const movedAt = new Date().toISOString();
+  const originalAmounts = movementDebitCredit(movement);
+  const typedMovement = applyTransferTargetType(movement, targetType);
+  const movedAmounts = movementDebitCredit(typedMovement);
   const moved = {
-    ...movement,
+    ...typedMovement,
     id: transferredMovementId(destinationSnapshot, sourceKey),
     source: sourceKey,
     transferOriginId: movement.transferOriginId || movement.id,
     transferOriginAccount: movement.transferOriginAccount || fromName,
     transferHistory: [
       ...(Array.isArray(movement.transferHistory) ? movement.transferHistory : []),
-      { fromWorkspaceId: originSnapshot.workspace.id, fromAccount: fromName, toWorkspaceId: destinationSnapshot.workspace.id, toAccount: toName, sourceKey, at: movedAt }
+      { fromWorkspaceId: originSnapshot.workspace.id, fromAccount: fromName, toWorkspaceId: destinationSnapshot.workspace.id, toAccount: toName, sourceKey, at: movedAt, originalType: originalAmounts.debit > 0 ? "debit" : "credit", destinationType: movedAmounts.debit > 0 ? "debit" : "credit" }
     ]
   };
   destinationSnapshot.sources[sourceKey].movements.push(moved);
@@ -2012,7 +2053,14 @@ function moveSnapshotMovement(originSnapshot, destinationSnapshot, sourceKey, mo
     date: movement.date,
     dateKey: movement.dateKey,
     description: movement.description,
-    amount: movement.amount,
+    amount: moved.amount,
+    debitAmount: movedAmounts.debit,
+    creditAmount: movedAmounts.credit,
+    originalAmount: movement.amount,
+    originalDebitAmount: originalAmounts.debit,
+    originalCreditAmount: originalAmounts.credit,
+    originalType: originalAmounts.debit > 0 ? "debit" : "credit",
+    destinationType: movedAmounts.debit > 0 ? "debit" : "credit",
     fromWorkspaceId: originSnapshot.workspace.id,
     fromAccount: fromName,
     toWorkspaceId: destinationSnapshot.workspace.id,
@@ -2030,13 +2078,14 @@ function moveSnapshotMovement(originSnapshot, destinationSnapshot, sourceKey, mo
   return true;
 }
 
-function moveSingleAccountMovement(origin, target, sourceKey, movementId) {
+function moveSingleAccountMovement(origin, target, sourceKey, movementId, targetType = "keep") {
   const originSnapshot = origin === "current" ? state.accountTransfer.currentSnapshot : state.accountTransfer.destinationSnapshot;
   const destinationSnapshot = target === "current" ? state.accountTransfer.currentSnapshot : state.accountTransfer.destinationSnapshot;
-  if (!moveSnapshotMovement(originSnapshot, destinationSnapshot, sourceKey, movementId)) {
+  if (!moveSnapshotMovement(originSnapshot, destinationSnapshot, sourceKey, movementId, targetType)) {
     showToast("No se pudo mover", "El movimiento ya no está pendiente o fue modificado.", "error");
     return;
   }
+  state.accountTransfer.typeOverrides.delete(accountTransferMovementKey(origin, sourceKey, movementId));
   state.accountTransfer.selectedCurrent.clear();
   state.accountTransfer.selectedDestination.clear();
   renderAccountTransferDialog();
@@ -2052,7 +2101,12 @@ function moveSelectedAccountMovements(origin, target) {
     const separator = key.indexOf(":");
     const sourceKey = key.slice(0, separator);
     const movementId = key.slice(separator + 1);
-    if (moveSnapshotMovement(originSnapshot, destinationSnapshot, sourceKey, movementId)) moved++;
+    const overrideKey = accountTransferMovementKey(origin, sourceKey, movementId);
+    const targetType = state.accountTransfer.typeOverrides.get(overrideKey) || "keep";
+    if (moveSnapshotMovement(originSnapshot, destinationSnapshot, sourceKey, movementId, targetType)) {
+      moved++;
+      state.accountTransfer.typeOverrides.delete(overrideKey);
+    }
   }
   selected.clear();
   state.accountTransfer.selectedCurrent.clear();
@@ -4890,9 +4944,9 @@ function exportWorkbook() {
     appendSheet(workbook, pendingBankSheet, "Pendientes de caja o banco");
 
     if ((state.transferLog || []).length) {
-      const transferHeaders = ["Dirección", "Fecha y hora", "Cuenta origen", "Cuenta destino", "Origen del movimiento", "Fila original", "Fecha del movimiento", "Descripción", "Débito", "Crédito", "ID original", "ID en destino"];
+      const transferHeaders = ["Dirección", "Fecha y hora", "Cuenta origen", "Cuenta destino", "Origen del movimiento", "Fila original", "Fecha del movimiento", "Descripción", "Tipo original", "Tipo en destino", "Débito", "Crédito", "ID original", "ID en destino"];
       const transferRows = state.transferLog.map(transferExportRow);
-      appendSheet(workbook, createStyledDataSheet(transferHeaders, transferRows, { fill: "EDF5FA", numericColumns: [8, 9] }), "Movimientos transferidos");
+      appendSheet(workbook, createStyledDataSheet(transferHeaders, transferRows, { fill: "EDF5FA", numericColumns: [10, 11] }), "Movimientos transferidos");
     }
 
     if (summary.excludedCount) {
@@ -4965,13 +5019,14 @@ function pendingExportRow(item) {
 }
 
 function transferExportRow(item) {
-  const movement = {
+  const totals = movementDebitCredit({
     amount: Number(item.amount) || 0,
-    debitAmount: Number(item.amount) >= 0 ? Math.abs(Number(item.amount) || 0) : 0,
-    creditAmount: Number(item.amount) < 0 ? Math.abs(Number(item.amount) || 0) : 0,
-    type: Number(item.amount) >= 0 ? "debit" : "credit"
-  };
-  const totals = movementDebitCredit(movement);
+    debitAmount: Number(item.debitAmount),
+    creditAmount: Number(item.creditAmount),
+    type: item.destinationType
+  });
+  const originalType = item.originalType || (Number(item.originalAmount ?? item.amount) >= 0 ? "debit" : "credit");
+  const destinationType = item.destinationType || (totals.debit > 0 ? "debit" : "credit");
   return [
     item.direction === "in" ? "Recibido" : "Enviado",
     formatDateTime(reviveStoredDate(item.at) || new Date()),
@@ -4981,6 +5036,8 @@ function transferExportRow(item) {
     item.row || "",
     item.dateKey ? formatDateInput(item.dateKey) : formatDate(reviveStoredDate(item.date)),
     item.description || "",
+    movementTypeLabel(originalType),
+    movementTypeLabel(destinationType),
     totals.debit,
     totals.credit,
     item.movementOriginId || "",
@@ -5291,6 +5348,7 @@ window.ReconciliationApp = Object.freeze({
   extractStateSnapshotFromWorkbook,
   normalizeTransferSnapshot,
   snapshotPendingMovements,
+  applyTransferTargetType,
   moveSnapshotMovement,
   persistSnapshot,
   readPersistedSnapshot,
