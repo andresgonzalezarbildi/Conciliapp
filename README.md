@@ -34,20 +34,18 @@ I also learned that an accounting reconciliation should not treat an approximate
 
 Finally, working with thousands of transactions showed the difference between optimizing calculation time and improving the complete user experience. Estimating workload, keeping the interface responsive, supporting cancellation, preserving progress, and limiting combinations are all parts of the same problem.
 
-## Account workspaces and safer matching
+## Conciliación múltiple y editor previo
 
-The reconciliation engine now resolves repeated one-to-one amounts as a global assignment instead of accepting the first compatible pair. This gives description, numeric references, and date coherence enough weight to avoid swapped matches when several transactions share the same amount.
+ConciliApp conserva únicamente la sesión activa para recuperación automática. Al pulsar **Nueva conciliación**, se elimina esa sesión y cualquier conciliación local anterior.
 
-Mixed-sign groups and internal debit/credit offsets are disabled by default. If enabled, mixed-sign groups stay under manual review, and an internal offset can only be auto-confirmed when there is strong reversal evidence such as a shared reference or wording related to a return, reversal, or cancellation.
+El **Editor de movimientos** funciona antes del proceso de conciliación y abre mostrando los movimientos pendientes. Permite cargar varias conciliaciones XLSX, editar fecha, descripción, monto, origen y tipo débito/crédito, eliminar movimientos y trasladarlos entre cuentas. Al guardar, se descargan todos los archivos modificados; si solo se editó una cuenta, la aplicación ofrece abrirla para conciliar o continuar editando.
 
-From the review screen, **Mover entre cuentas** can load another exported reconciliation or a locally saved account. Pending movements can be selected or dragged between accounts. The transfer preserves the original row and movement ID as audit metadata, stores both account states locally, and adds a **Movimientos transferidos** sheet to later exports.
+La vista **Resumen conjunto** muestra los pendientes de todas las cuentas cargadas y propone cruces entre cuentas por fecha, importe, descripción y referencia. También detecta agrupaciones uno-a-varios o varios-a-uno, como un recibo único contra varios movimientos UTE. Al resolver un cruce, el movimiento se traslada a la cuenta elegida, se corrige el signo cuando corresponde y se crea una conciliación confirmada dentro de esa cuenta, manteniendo la trazabilidad en las exportaciones.
 
-Run the regression tests with:
+El motor de conciliación resuelve importes repetidos mediante una asignación global y evita confirmar automáticamente agrupaciones de signos mezclados o compensaciones internas sin evidencia suficiente.
+
+Ejecute las pruebas de regresión con:
 
 ```bash
 npm test
 ```
-## Traslado entre cuentas
-
-La ventana **Mover entre cuentas** permite cargar otra conciliación y trasladar movimientos pendientes mediante selección o arrastrar y soltar. Antes de mover cada fila puede elegirse cómo debe quedar en la cuenta receptora: **Mantener**, **Débito** o **Crédito**. El cambio conserva el tipo original y el tipo aplicado en la hoja **Movimientos transferidos**.
-

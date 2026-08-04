@@ -7,10 +7,10 @@
   <meta name="description" content="Herramienta local para conciliación de movimientos contables, de caja y banco.">
   <title>Conciliación contable</title>
   <link rel="icon" href="favicon.png" type="image/png">
-  <link rel="stylesheet" href="styles.css?v=20260804-3">
+  <link rel="stylesheet" href="styles.css?v=20260804-4">
   <script defer src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script defer src="app.js?v=20260804-3"></script>
+  <script defer src="app.js?v=20260804-4"></script>
 </head>
 <body>
   <header class="app-header">
@@ -336,9 +336,8 @@
         <button class="icon-button" data-close-movement-editor type="button" aria-label="Cerrar"><i data-lucide="x"></i></button>
       </div>
       <div class="movement-editor-loader">
-        <label class="field"><span>Cuenta guardada</span><select id="movementEditorSavedSelect"><option value="">Seleccione una cuenta local</option></select></label>
-        <button id="addSavedMovementAccountBtn" class="button button-secondary" type="button"><i data-lucide="folder-plus"></i> Agregar guardada</button>
-        <button id="addMovementAccountFilesBtn" class="button button-secondary" type="button"><i data-lucide="files"></i> Agregar XLSX</button>
+        <div class="movement-editor-session-note"><i data-lucide="layers-3"></i><div><strong>Sesión de edición</strong><span>Agregue todas las conciliaciones que quiera revisar juntas. No se guardan como historial local.</span></div></div>
+        <button id="addMovementAccountFilesBtn" class="button button-secondary" type="button"><i data-lucide="files"></i> Agregar conciliaciones XLSX</button>
         <input id="movementEditorFilesInput" type="file" accept=".xlsx" multiple hidden>
         <label class="field movement-editor-new-account"><span>Nueva cuenta vacía</span><input id="newMovementAccountName" type="text" maxlength="80" placeholder="Ej.: ITAU $"></label>
         <button id="createMovementAccountBtn" class="button button-secondary" type="button"><i data-lucide="plus"></i> Crear cuenta</button>
@@ -346,7 +345,7 @@
       <div class="movement-editor-toolbar">
         <label class="search-field"><i data-lucide="search"></i><input id="movementEditorSearch" type="search" placeholder="Buscar fecha, descripción, importe o ID"></label>
         <label class="field inline"><span>Origen</span><select id="movementEditorSourceFilter"><option value="all">Todos</option><option value="system">Sistema contable</option><option value="bank">Caja o banco</option></select></label>
-        <label class="field inline"><span>Mostrar</span><select id="movementEditorStatusFilter"><option value="all">Todos</option><option value="pending">Pendientes</option><option value="reconciled">Conciliados o posibles</option></select></label>
+        <label class="field inline"><span>Mostrar</span><select id="movementEditorStatusFilter"><option value="pending" selected>Pendientes</option><option value="all">Todos</option><option value="reconciled">Conciliados o posibles</option></select></label>
       </div>
       <div class="movement-editor-layout">
         <aside id="movementEditorAccounts" class="movement-editor-accounts"></aside>
@@ -356,8 +355,19 @@
       <div class="modal-actions movement-editor-footer">
         <button class="button button-secondary" data-close-movement-editor type="button">Cerrar</button>
         <button id="downloadMovementAccountBtn" class="button button-secondary" type="button"><i data-lucide="download"></i> Descargar seleccionada</button>
-        <button id="saveMovementAccountsBtn" class="button button-secondary" type="button"><i data-lucide="save"></i> Guardar todas</button>
-        <button id="openSelectedMovementAccountBtn" class="button button-primary" type="button"><i data-lucide="folder-input"></i> Guardar y abrir seleccionada</button>
+        <button id="saveMovementAccountsBtn" class="button button-primary" type="button"><i data-lucide="save"></i> Guardar cambios</button>
+      </div>
+    </div>
+  </dialog>
+
+
+
+  <dialog id="movementEditorSaveDialog" class="modal">
+    <div class="modal-card movement-editor-save-card">
+      <div class="modal-header"><div><h2>Cambios guardados</h2><p id="movementEditorSaveMessage">La cuenta corregida se descargó correctamente.</p></div><button class="icon-button" data-close-movement-save type="button" aria-label="Cerrar"><i data-lucide="x"></i></button></div>
+      <div class="movement-editor-save-options">
+        <button class="movement-editor-save-option" data-close-movement-save type="button"><i data-lucide="table-pen"></i><span><strong>Continuar editando</strong><small>Mantener abiertas las cuentas cargadas.</small></span></button>
+        <button id="openSavedMovementAccountBtn" class="movement-editor-save-option primary" type="button"><i data-lucide="git-compare-arrows"></i><span><strong>Ir a la conciliación</strong><small>Abrir esta cuenta y ejecutar o revisar la conciliación.</small></span></button>
       </div>
     </div>
   </dialog>

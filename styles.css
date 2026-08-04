@@ -708,7 +708,7 @@ p { color: var(--muted); }
 .movement-editor-header { flex: 0 0 auto; }
 .movement-editor-loader {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(150px, auto) minmax(135px, auto) minmax(210px, .85fr) minmax(125px, auto);
+  grid-template-columns: minmax(280px, 1.25fr) minmax(210px, .8fr) minmax(210px, .8fr) minmax(135px, auto);
   align-items: end;
   gap: 10px;
   padding: 14px 22px;
@@ -716,6 +716,11 @@ p { color: var(--muted); }
   border-bottom: 1px solid var(--line);
 }
 .movement-editor-loader .button { width: 100%; min-width: 0; height: 39px; justify-content: center; white-space: nowrap; }
+.movement-editor-session-note { display: flex; align-items: center; gap: 10px; min-height: 39px; padding: 7px 10px; color: var(--muted); background: #fff; border: 1px solid var(--line); border-radius: 6px; }
+.movement-editor-session-note > svg { flex: 0 0 auto; width: 18px; height: 18px; color: var(--primary); }
+.movement-editor-session-note div { display: grid; gap: 1px; min-width: 0; }
+.movement-editor-session-note strong { color: var(--ink); font-size: 11px; }
+.movement-editor-session-note span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
 .movement-editor-toolbar {
   display: grid;
   grid-template-columns: minmax(260px, 1fr) minmax(190px, auto) minmax(190px, auto);
@@ -767,11 +772,50 @@ p { color: var(--muted); }
 .movement-editor-table .movement-editor-actions { text-align: right; }
 .movement-editor-table .movement-editor-actions .button { width: 100%; min-width: 72px; justify-content: center; }
 .movement-editor-source-badge, .movement-editor-state-badge { display: inline-flex; align-items: center; min-height: 22px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: #fff; font-size: 9px; font-weight: 700; white-space: nowrap; }
-.movement-editor-state-badge.reconciled { color: var(--green); background: var(--green-soft); border-color: var(--green-line); }
+.movement-editor-state-badge.reconciled, .movement-editor-state-badge.confirmed { color: var(--green); background: var(--green-soft); border-color: var(--green-line); }
 .movement-editor-state-badge.possible { color: var(--yellow); background: var(--yellow-soft); border-color: var(--yellow-line); }
 .movement-editor-pagination { flex: 0 0 auto; min-height: 44px; padding: 8px 22px; background: #f8fafa; border-top: 1px solid var(--line); }
-.movement-editor-footer { display: grid; grid-template-columns: minmax(110px, .65fr) minmax(180px, 1fr) minmax(160px, 1fr) minmax(220px, 1.15fr); flex: 0 0 auto; }
+.movement-editor-footer { display: grid; grid-template-columns: repeat(3, minmax(170px, 1fr)); flex: 0 0 auto; }
 .movement-editor-footer .button { width: 100%; min-width: 0; justify-content: center; white-space: nowrap; }
+
+.movement-editor-summary-account { border-style: dashed; }
+.movement-editor-summary-account strong { color: var(--primary); }
+.movement-account-unsaved { display: inline-flex; margin-left: 9px; padding: 3px 7px; color: var(--yellow); background: var(--yellow-soft); border: 1px solid var(--yellow-line); border-radius: 999px; font-size: 9px; vertical-align: middle; }
+.movement-summary-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+.movement-summary-heading h3 { margin: 0; font-size: 17px; }
+.movement-summary-heading p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
+.movement-summary-heading > span { flex: 0 0 auto; padding: 5px 9px; color: var(--primary); background: var(--primary-soft); border: 1px solid var(--line-strong); border-radius: 999px; font-size: 10px; font-weight: 800; }
+.movement-summary-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin-bottom: 14px; }
+.movement-summary-cards article { display: grid; gap: 4px; min-height: 72px; padding: 12px; background: #fff; border: 1px solid var(--line); border-radius: 7px; }
+.movement-summary-cards span { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
+.movement-summary-cards strong { align-self: end; font-size: 18px; font-variant-numeric: tabular-nums; }
+.movement-summary-section { margin-top: 14px; }
+.movement-summary-section-heading { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin-bottom: 7px; }
+.movement-summary-section-heading h4 { margin: 0; font-size: 13px; }
+.movement-summary-section-heading p { margin: 3px 0 0; color: var(--muted); font-size: 9px; }
+.movement-summary-section-heading > span { color: var(--muted); font-size: 10px; font-weight: 700; }
+.movement-summary-table { min-width: 920px; }
+.movement-summary-account { display: grid; gap: 3px; }
+.movement-summary-account small { display: inline-flex; align-items: center; gap: 4px; color: var(--yellow); font-size: 8px; }
+.movement-summary-account small svg { width: 10px; height: 10px; }
+.movement-cross-table { min-width: 1080px; }
+.movement-cross-table td { vertical-align: top; }
+.movement-cross-table td > strong { display: block; margin-bottom: 3px; font-size: 10px; }
+.movement-cross-table td > small { display: block; margin-top: 3px; color: var(--muted); font-size: 8px; }
+.cross-description { display: block; max-width: 260px; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
+.cross-score { display: inline-flex; min-width: 42px; justify-content: center; padding: 3px 6px; color: var(--green); background: var(--green-soft); border: 1px solid var(--green-line); border-radius: 999px; font-size: 9px; font-weight: 800; }
+.cross-actions { display: grid; grid-template-columns: repeat(2, minmax(100px, 1fr)); gap: 6px; }
+.cross-actions .button { width: 100%; min-width: 0; overflow: hidden; justify-content: center; text-overflow: ellipsis; white-space: nowrap; }
+.movement-editor-save-card { width: min(650px, calc(100vw - 28px)); }
+.movement-editor-save-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 18px 22px 22px; }
+.movement-editor-save-option { display: flex; align-items: center; gap: 12px; min-height: 92px; padding: 14px; text-align: left; background: #fff; border: 1px solid var(--line); border-radius: 8px; }
+.movement-editor-save-option:hover { border-color: var(--line-strong); background: var(--surface-muted); }
+.movement-editor-save-option.primary { border-color: var(--primary); background: var(--primary-soft); }
+.movement-editor-save-option > svg { flex: 0 0 auto; width: 24px; height: 24px; color: var(--primary); }
+.movement-editor-save-option span { display: grid; gap: 4px; }
+.movement-editor-save-option strong { font-size: 12px; }
+.movement-editor-save-option small { color: var(--muted); font-size: 9px; }
+
 .movement-edit-card { width: min(780px, calc(100vw - 28px)); }
 .movement-edit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 18px 22px; }
 .movement-edit-grid .full { grid-column: 1 / -1; }
@@ -780,8 +824,10 @@ p { color: var(--muted); }
 #movementEditWarning { margin: 14px 22px 0; }
 
 @media (max-width: 1100px) {
-  .movement-editor-loader { grid-template-columns: minmax(0, 1fr) minmax(150px, auto) minmax(135px, auto); }
+  .movement-editor-loader { grid-template-columns: minmax(0, 1fr) minmax(190px, auto) minmax(190px, auto); }
+  .movement-editor-session-note { grid-column: 1 / -1; }
   .movement-editor-new-account { grid-column: 1 / 3; }
+  .movement-summary-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .movement-editor-layout { grid-template-columns: 230px minmax(0, 1fr); }
 }
 
@@ -789,7 +835,7 @@ p { color: var(--muted); }
   .movement-editor-dialog { padding: 0; }
   .movement-editor-card { width: 100vw; height: 100vh; max-height: 100vh; border-radius: 0; }
   .movement-editor-loader { grid-template-columns: 1fr 1fr; }
-  .movement-editor-loader > .field:first-child { grid-column: 1 / -1; }
+  .movement-editor-session-note { grid-column: 1 / -1; }
   .movement-editor-new-account { grid-column: 1; }
   .movement-editor-toolbar { grid-template-columns: 1fr 1fr; }
   .movement-editor-toolbar .search-field { grid-column: 1 / -1; }
@@ -797,14 +843,17 @@ p { color: var(--muted); }
   .movement-editor-accounts { max-height: 180px; border-right: 0; border-bottom: 1px solid var(--line); }
   .movement-editor-account-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .movement-editor-content { overflow: visible; }
-  .movement-editor-footer { grid-template-columns: 1fr 1fr; }
+  .movement-editor-footer { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .movement-summary-heading, .movement-summary-section-heading { align-items: stretch; flex-direction: column; }
+  .cross-actions { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 560px) {
   .movement-editor-loader, .movement-editor-toolbar, .movement-editor-footer, .movement-edit-grid, .movement-edit-actions { grid-template-columns: 1fr; }
-  .movement-editor-loader > .field:first-child, .movement-editor-new-account, .movement-editor-toolbar .search-field, .movement-edit-grid .full { grid-column: 1; }
+  .movement-editor-session-note, .movement-editor-new-account, .movement-editor-toolbar .search-field, .movement-edit-grid .full { grid-column: 1; }
   .movement-editor-account-list { grid-template-columns: 1fr; }
   .movement-editor-account-heading { align-items: stretch; flex-direction: column; }
+  .movement-summary-cards, .movement-editor-save-options { grid-template-columns: 1fr; }
   .movement-editor-rename { grid-template-columns: 1fr; }
   .movement-edit-actions > span { display: none; }
 }

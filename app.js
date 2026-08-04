@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_BUILD = "2026.08.04-3";
+const APP_BUILD = "2026.08.04-4";
 const STATE_SCHEMA_VERSION = 1;
 const STATE_SHEET_NAME = "Estado ConciliApp";
 const STATE_CHUNK_SIZE = 30000;
@@ -8,6 +8,7 @@ const LOCAL_DATABASE_NAME = "ConciliAppLocal";
 const LOCAL_DATABASE_VERSION = 1;
 const LOCAL_STATE_STORE = "reconciliations";
 const LOCAL_STATE_KEY = "current";
+const MOVEMENT_EDITOR_SUMMARY_ID = "__summary__";
 
 const DEFAULT_CONFIG = Object.freeze({
   dateTolerance: 1,
@@ -116,13 +117,16 @@ function createAccountTransferState() {
 function createMovementEditorState() {
   return {
     accounts: [],
-    selectedAccountId: "",
+    selectedAccountId: MOVEMENT_EDITOR_SUMMARY_ID,
     search: "",
     sourceFilter: "all",
-    statusFilter: "all",
+    statusFilter: "pending",
     page: 1,
     editing: null,
-    dirty: false
+    dirty: false,
+    modifiedAccountIds: new Set(),
+    postSaveAccountId: "",
+    crossCandidates: new Map()
   };
 }
 
@@ -201,6 +205,7 @@ async function initializeApplication() {
   if (typeof XLSX === "undefined") {
     showToast("No se pudo cargar el componente de Excel", "Verifique la conexión a Internet y vuelva a abrir el archivo.", "error", 9000);
   }
+  await purgeArchivedWorkspaceSnapshots();
   await restorePersistedStateOnStartup();
 }
 
@@ -249,8 +254,8 @@ function cacheDom() {
   dom.movementEditorAccounts = document.getElementById("movementEditorAccounts");
   dom.movementEditorContent = document.getElementById("movementEditorContent");
   dom.movementEditorPagination = document.getElementById("movementEditorPagination");
-  dom.movementEditorSavedSelect = document.getElementById("movementEditorSavedSelect");
   dom.movementEditorFilesInput = document.getElementById("movementEditorFilesInput");
+  dom.movementEditorSaveDialog = document.getElementById("movementEditorSaveDialog");
   dom.movementEditDialog = document.getElementById("movementEditDialog");
   dom.movementEditForm = document.getElementById("movementEditForm");
   dom.toastRegion = document.getElementById("toastRegion");
@@ -354,7 +359,6 @@ function bindGlobalEvents() {
     event.target.value = "";
     if (files.length) await loadMovementEditorFiles(files);
   });
-  document.getElementById("addSavedMovementAccountBtn").addEventListener("click", addSavedMovementEditorAccount);
   document.getElementById("createMovementAccountBtn").addEventListener("click", createEmptyMovementEditorAccount);
   document.getElementById("movementEditorSearch").addEventListener("input", event => {
     state.movementEditor.search = event.target.value.trim().toLowerCase();
@@ -371,9 +375,10 @@ function bindGlobalEvents() {
     state.movementEditor.page = 1;
     renderMovementEditor();
   });
-  document.getElementById("saveMovementAccountsBtn").addEventListener("click", saveAllMovementEditorAccounts);
-  document.getElementById("openSelectedMovementAccountBtn").addEventListener("click", openSelectedMovementEditorAccount);
+  document.getElementById("saveMovementAccountsBtn").addEventListener("click", saveMovementEditorChanges);
   document.getElementById("downloadMovementAccountBtn").addEventListener("click", downloadSelectedMovementEditorAccount);
+  document.getElementById("openSavedMovementAccountBtn").addEventListener("click", openPostSaveMovementAccount);
+  document.querySelectorAll("[data-close-movement-save]").forEach(button => button.addEventListener("click", () => dom.movementEditorSaveDialog.close()));
   document.querySelectorAll("[data-close-movement-editor]").forEach(button => button.addEventListener("click", closeMovementEditor));
   document.querySelectorAll("[data-close-movement-edit]").forEach(button => button.addEventListener("click", () => dom.movementEditDialog.close()));
   dom.movementEditForm.addEventListener("submit", saveMovementEditorEdit);
@@ -402,6 +407,7 @@ function bindGlobalEvents() {
       if (dom.periodTrimDialog.open) dom.periodTrimDialog.close();
       if (dom.accountTransferDialog.open) dom.accountTransferDialog.close();
       if (dom.movementEditDialog.open) dom.movementEditDialog.close();
+      else if (dom.movementEditorSaveDialog?.open) dom.movementEditorSaveDialog.close();
       else if (dom.movementEditorDialog.open) closeMovementEditor();
     }
   });
@@ -1462,14 +1468,14 @@ function renderConfigSummary() {
   refreshIcons(container);
 }
 
-function resetApplication() {
-  try {
-    const previousSnapshot = createStateSnapshot();
-    if (snapshotHasProgress(previousSnapshot) && window.indexedDB) persistSnapshot(previousSnapshot, workspaceStorageKey(previousSnapshot.workspace.id)).catch(() => {});
-  } catch {}
-  clearPersistedState().catch(() => {});
+async function resetApplication() {
   if (state.persistence.saveTimer) window.clearTimeout(state.persistence.saveTimer);
   state.persistence.saveTimer = null;
+  try {
+    await clearAllPersistedState();
+  } catch (error) {
+    console.error(error);
+  }
   state.step = 1;
   state.maxVisitedStep = 1;
   // Los controles del editor conservan referencias a estos objetos. Se limpian
@@ -1522,12 +1528,12 @@ function resetApplication() {
   syncReviewControls();
   populateConfigForm();
   goToStep(1);
-  showToast("Nueva conciliación", "La cuenta anterior quedó guardada localmente y la aplicación está lista para comenzar otra.", "success");
+  showToast("Nueva conciliación", "Se eliminó la sesión anterior y la aplicación quedó lista para comenzar otra.", "success");
 }
 
-function confirmNewReconciliation() {
-  const hasData = state.sources.system.file || state.sources.bank.file || state.results.processingAt;
-  if (!hasData || window.confirm("La cuenta actual quedará guardada localmente y se abrirá una conciliación nueva. ¿Desea continuar?")) resetApplication();
+async function confirmNewReconciliation() {
+  const hasData = state.sources.system.file || state.sources.bank.file || state.results.processingAt || snapshotHasProgress(createStateSnapshot());
+  if (!hasData || window.confirm("Se borrará la conciliación activa y cualquier sesión local anterior. Los archivos XLSX ya descargados no se modifican. ¿Desea continuar?")) await resetApplication();
 }
 
 function clearReconciliationResultsForSourceChange() {
@@ -2255,10 +2261,9 @@ async function openMovementEditor() {
     state.movementEditor.accounts.push({ snapshot: current, origin: "current" });
     state.movementEditor.selectedAccountId = current.workspace.id;
   }
-  await populateMovementEditorSavedSelect();
   document.getElementById("movementEditorSearch").value = "";
   document.getElementById("movementEditorSourceFilter").value = "all";
-  document.getElementById("movementEditorStatusFilter").value = "all";
+  document.getElementById("movementEditorStatusFilter").value = "pending";
   renderMovementEditor();
   dom.movementEditorDialog.showModal();
   refreshIcons(dom.movementEditorDialog);
@@ -2267,43 +2272,6 @@ async function openMovementEditor() {
 function closeMovementEditor() {
   dom.movementEditDialog.open && dom.movementEditDialog.close();
   dom.movementEditorDialog.close();
-}
-
-async function populateMovementEditorSavedSelect() {
-  dom.movementEditorSavedSelect.innerHTML = `<option value="">Seleccione una cuenta local</option>`;
-  if (!window.indexedDB) return;
-  try {
-    const loaded = new Set(state.movementEditor.accounts.map(account => account.snapshot.workspace.id));
-    const entries = await readSavedWorkspaceSnapshots();
-    entries.sort((a, b) => snapshotWorkspaceName(a.snapshot).localeCompare(snapshotWorkspaceName(b.snapshot), "es"));
-    entries.forEach(entry => {
-      if (!entry.snapshot?.workspace?.id || loaded.has(entry.snapshot.workspace.id)) return;
-      const option = document.createElement("option");
-      option.value = String(entry.key);
-      option.textContent = snapshotWorkspaceName(entry.snapshot);
-      dom.movementEditorSavedSelect.append(option);
-    });
-  } catch (error) {
-    console.error(error);
-  }
-}
-
-async function addSavedMovementEditorAccount() {
-  const key = dom.movementEditorSavedSelect.value;
-  if (!key) return showToast("Seleccione una cuenta", "Elija una cuenta guardada para agregarla al editor.", "error");
-  try {
-    const raw = await readPersistedSnapshot(key);
-    if (!raw) throw new Error("La cuenta guardada ya no está disponible.");
-    const snapshot = ensureUniqueMovementEditorWorkspace(normalizeTransferSnapshot(raw, "Cuenta"));
-    state.movementEditor.accounts.push({ snapshot, origin: "local" });
-    state.movementEditor.selectedAccountId = snapshot.workspace.id;
-    state.movementEditor.page = 1;
-    await populateMovementEditorSavedSelect();
-    renderMovementEditor();
-  } catch (error) {
-    console.error(error);
-    showToast("No se pudo agregar", error.message || "La cuenta no es compatible.", "error");
-  }
 }
 
 async function loadMovementEditorFiles(files) {
@@ -2316,7 +2284,6 @@ async function loadMovementEditorFiles(files) {
       const snapshot = ensureUniqueMovementEditorWorkspace(normalizeTransferSnapshot(extractStateSnapshotFromWorkbook(workbook), file.name.replace(/\.xlsx$/i, "")));
       snapshot.workspace.name ||= file.name.replace(/\.xlsx$/i, "");
       state.movementEditor.accounts.push({ snapshot, origin: "file", fileName: file.name });
-      state.movementEditor.selectedAccountId = snapshot.workspace.id;
       added++;
     } catch (error) {
       console.error(error);
@@ -2324,9 +2291,12 @@ async function loadMovementEditorFiles(files) {
     }
   }
   if (added) {
+    state.movementEditor.selectedAccountId = state.movementEditor.accounts.length > 1
+      ? MOVEMENT_EDITOR_SUMMARY_ID
+      : state.movementEditor.accounts[0].snapshot.workspace.id;
     state.movementEditor.page = 1;
     renderMovementEditor();
-    showToast("Cuentas agregadas", `${added} cuenta(s) quedaron disponibles para editar.`, "success");
+    showToast("Conciliaciones agregadas", `${added} cuenta(s) quedaron disponibles para revisar juntas.`, "success");
   }
 }
 
@@ -2338,9 +2308,20 @@ function createEmptyMovementEditorAccount() {
   state.movementEditor.accounts.push({ snapshot, origin: "new" });
   state.movementEditor.selectedAccountId = snapshot.workspace.id;
   state.movementEditor.page = 1;
-  state.movementEditor.dirty = true;
+  markMovementEditorAccountsModified(snapshot.workspace.id);
   input.value = "";
   renderMovementEditor();
+}
+
+function markMovementEditorAccountsModified(...accountIds) {
+  const editor = state.movementEditor;
+  for (const accountId of accountIds.flat().filter(Boolean)) editor.modifiedAccountIds.add(accountId);
+  editor.dirty = editor.modifiedAccountIds.size > 0;
+  syncMovementEditorButtons();
+}
+
+function movementEditorAccountIsModified(accountId) {
+  return state.movementEditor.modifiedAccountIds.has(accountId);
 }
 
 function snapshotMovementReservation(snapshot) {
@@ -2371,24 +2352,434 @@ function movementEditorRows(snapshot) {
   }).sort((a, b) => String(a.movement.dateKey || "").localeCompare(String(b.movement.dateKey || "")) || Number(a.movement.row || 0) - Number(b.movement.row || 0));
 }
 
+function movementEditorAccountMetrics(snapshot) {
+  const system = snapshotPendingMovements(snapshot, "system");
+  const bank = snapshotPendingMovements(snapshot, "bank");
+  const systemTotals = debitCreditTotals(system);
+  const bankTotals = debitCreditTotals(bank);
+  return {
+    system,
+    bank,
+    pendingCount: system.length + bank.length,
+    systemTotals,
+    bankTotals,
+    pendingAbsolute: roundMoney([...system, ...bank].reduce((sum, item) => {
+      const amounts = movementDebitCredit(item);
+      return sum + amounts.debit + amounts.credit;
+    }, 0))
+  };
+}
+
+function crossAccountCandidateKey(accountId, sourceKey, movementId) {
+  return `${accountId}:${sourceKey}:${movementId}`;
+}
+
+function crossGroupDescriptionKey(description) {
+  const ignored = new Set(["p", "iva", "rediva", "retiva", "devolucion", "ajuste", "movimiento", "banco", "caja"]);
+  const tokens = normalizeDescription(description).split(/\s+/).filter(token => token && !ignored.has(token));
+  return tokens[0] || normalizeDescription(description).split(/\s+/).find(Boolean) || "";
+}
+
+function buildCrossAccountEntries(account, sourceKey) {
+  const snapshot = account.snapshot || account;
+  const accountId = snapshot?.workspace?.id;
+  const movements = snapshotPendingMovements(snapshot, sourceKey);
+  const entries = movements.map(movement => {
+    const amount = Number(movement.amount) || 0;
+    return {
+      snapshot,
+      accountId,
+      sourceKey,
+      movements: [movement],
+      total: amount,
+      magnitude: Math.abs(amount),
+      date: reviveStoredDate(movement.date) || parseDateValue(movement.dateKey),
+      description: movement.description || "",
+      group: false
+    };
+  });
+  const groups = new Map();
+  for (const movement of movements) {
+    const dateKey = movement.dateKey || toDateKey(reviveStoredDate(movement.date));
+    const key = crossGroupDescriptionKey(movement.description);
+    if (!dateKey || !key) continue;
+    const groupKey = `${dateKey}|${key}`;
+    if (!groups.has(groupKey)) groups.set(groupKey, { dateKey, key, movements: [] });
+    groups.get(groupKey).movements.push(movement);
+  }
+  for (const group of groups.values()) {
+    if (group.movements.length < 2) continue;
+    const total = roundMoney(group.movements.reduce((sum, movement) => sum + (Number(movement.amount) || 0), 0));
+    if (Math.abs(total) <= .005) continue;
+    entries.push({
+      snapshot,
+      accountId,
+      sourceKey,
+      movements: group.movements,
+      total,
+      magnitude: Math.abs(total),
+      date: parseDateValue(group.dateKey),
+      description: group.key,
+      group: true
+    });
+  }
+  return entries;
+}
+
+function findCrossAccountCandidates(accounts, options = {}) {
+  const dateTolerance = Number.isFinite(Number(options.dateTolerance)) ? Math.max(0, Number(options.dateTolerance)) : 7;
+  const amountTolerance = Number.isFinite(Number(options.amountTolerance)) ? Math.max(0, Number(options.amountTolerance)) : .10;
+  const maximum = Number.isFinite(Number(options.maximum)) ? Math.max(1, Number(options.maximum)) : 100;
+  const systemEntries = (accounts || []).flatMap(account => buildCrossAccountEntries(account, "system"));
+  const bankEntries = (accounts || []).flatMap(account => buildCrossAccountEntries(account, "bank"));
+  const bankIndex = new Map();
+  for (const entry of bankEntries) {
+    const cents = Math.round(entry.magnitude * 100);
+    if (!bankIndex.has(cents)) bankIndex.set(cents, []);
+    bankIndex.get(cents).push(entry);
+  }
+  const candidates = [];
+  const toleranceCents = Math.max(0, Math.round(amountTolerance * 100));
+  for (const systemEntry of systemEntries) {
+    const systemCents = Math.round(systemEntry.magnitude * 100);
+    for (let cents = systemCents - toleranceCents; cents <= systemCents + toleranceCents; cents++) {
+      for (const bankEntry of bankIndex.get(cents) || []) {
+        if (bankEntry.accountId === systemEntry.accountId) continue;
+        if (systemEntry.group && bankEntry.group) continue;
+        if (!systemEntry.date || !bankEntry.date) continue;
+        const dateDifference = daysBetween(systemEntry.date, bankEntry.date);
+        if (dateDifference > dateTolerance) continue;
+        const amountDifference = roundMoney(Math.abs(systemEntry.magnitude - bankEntry.magnitude));
+        const similarity = descriptionSimilarity(systemEntry.description, bankEntry.description);
+        const refs = referenceScore(
+          systemEntry.movements.map(item => item.description),
+          bankEntry.movements.map(item => item.description)
+        );
+        const signCorrectionNeeded = Math.sign(systemEntry.total) !== Math.sign(bankEntry.total);
+        const score = Math.round(clamp(
+          50 * Math.max(0, 1 - amountDifference / Math.max(amountTolerance || .01, .01)) +
+          20 * Math.max(.25, 1 - dateDifference / (dateTolerance + 1)) +
+          25 * similarity + refs - (signCorrectionNeeded ? 2 : 0),
+          0,
+          100
+        ));
+        if (score < 60 && similarity < .40 && !refs) continue;
+        const systemIds = systemEntry.movements.map(item => item.id);
+        const bankIds = bankEntry.movements.map(item => item.id);
+        candidates.push({
+          id: `${systemEntry.accountId}:${systemIds.join(",")}|${bankEntry.accountId}:${bankIds.join(",")}`,
+          systemAccountId: systemEntry.accountId,
+          bankAccountId: bankEntry.accountId,
+          systemSnapshot: systemEntry.snapshot,
+          bankSnapshot: bankEntry.snapshot,
+          systemMovements: systemEntry.movements,
+          bankMovements: bankEntry.movements,
+          systemMovement: systemEntry.movements[0],
+          bankMovement: bankEntry.movements[0],
+          systemMagnitude: systemEntry.magnitude,
+          bankMagnitude: bankEntry.magnitude,
+          systemTotal: systemEntry.total,
+          bankTotal: bankEntry.total,
+          amountDifference,
+          dateDifference,
+          similarity,
+          score,
+          signCorrectionNeeded,
+          type: systemEntry.movements.length > 1 ? "many-to-one" : bankEntry.movements.length > 1 ? "one-to-many" : "one-to-one"
+        });
+      }
+    }
+  }
+  candidates.sort((a, b) => b.score - a.score || a.amountDifference - b.amountDifference || a.dateDifference - b.dateDifference || (a.type === "one-to-one" ? -1 : 1));
+  const used = new Set();
+  const selected = [];
+  for (const candidate of candidates) {
+    const keys = [
+      ...candidate.systemMovements.map(item => crossAccountCandidateKey(candidate.systemAccountId, "system", item.id)),
+      ...candidate.bankMovements.map(item => crossAccountCandidateKey(candidate.bankAccountId, "bank", item.id))
+    ];
+    if (keys.some(key => used.has(key))) continue;
+    keys.forEach(key => used.add(key));
+    selected.push(candidate);
+    if (selected.length >= maximum) break;
+  }
+  return selected;
+}
+
+function nextSnapshotReconciliationId(snapshot) {
+  snapshot.results ||= createEmptyResults();
+  let next = Number(snapshot.results.nextId) || 1;
+  const existing = new Set((snapshot.results.reconciliations || []).map(item => item.id));
+  let id;
+  do id = `CON-${String(next++).padStart(5, "0")}`;
+  while (existing.has(id));
+  snapshot.results.nextId = next;
+  return id;
+}
+
+function createResolvedCrossReconciliation(snapshot, systemMovements, bankMovements, originAccountName) {
+  const systemList = Array.isArray(systemMovements) ? systemMovements : [systemMovements];
+  const bankList = Array.isArray(bankMovements) ? bankMovements : [bankMovements];
+  const totalSystem = roundMoney(systemList.reduce((sum, item) => sum + (Number(item.amount) || 0), 0));
+  const totalBank = roundMoney(bankList.reduce((sum, item) => sum + (Number(item.amount) || 0), 0));
+  let dateDifference = 0;
+  for (const systemMovement of systemList) {
+    for (const bankMovement of bankList) {
+      const systemDate = reviveStoredDate(systemMovement.date) || parseDateValue(systemMovement.dateKey);
+      const bankDate = reviveStoredDate(bankMovement.date) || parseDateValue(bankMovement.dateKey);
+      if (systemDate && bankDate) dateDifference = Math.max(dateDifference, daysBetween(systemDate, bankDate));
+    }
+  }
+  const difference = roundMoney(totalSystem - totalBank);
+  const similarity = groupedDescriptionSimilarity(systemList, bankList);
+  const createdAt = new Date();
+  return {
+    id: nextSnapshotReconciliationId(snapshot),
+    type: inferType(systemList, bankList),
+    systemIds: systemList.map(item => item.id),
+    bankIds: bankList.map(item => item.id),
+    systemMovements: systemList,
+    bankMovements: bankList,
+    totalSystem,
+    totalBank,
+    totalBankOriginal: totalBank,
+    difference,
+    amountTolerance: .10,
+    amountWithinTolerance: Math.abs(difference) <= .105,
+    dateWithinTolerance: dateDifference <= 7,
+    dateDifference,
+    descriptionSimilarity: similarity,
+    exactAmountAndDate: Math.abs(difference) <= .005 && dateDifference === 0,
+    score: 100,
+    exact: Math.abs(difference) <= .005,
+    ambiguous: false,
+    alternativeCount: 0,
+    totalMembers: systemList.length + bankList.length,
+    status: "confirmed",
+    criterion: "Cruce entre cuentas resuelto manualmente",
+    reasons: ["El usuario trasladó los movimientos pendientes a la cuenta correspondiente", `El movimiento provenía de ${originAccountName}`],
+    observation: `Movimiento trasladado desde ${originAccountName} para resolver un cruce entre cuentas.`,
+    createdAt,
+    manual: true,
+    manuallyApproved: true,
+    crossAccountResolved: true,
+    crossOriginAccount: originAccountName
+  };
+}
+
+function movementTypeFromAmount(movement) {
+  const amounts = movementDebitCredit(movement);
+  return amounts.credit > 0 ? "credit" : "debit";
+}
+
+function oppositeMovementType(type) {
+  return type === "credit" ? "debit" : "credit";
+}
+
+function resolveMovementEditorCrossCandidate(candidate, targetSide) {
+  if (!candidate) throw new Error("El cruce ya no está disponible.");
+  const accounts = state.movementEditor.accounts;
+  const systemAccount = movementEditorAccountById(candidate.systemAccountId);
+  const bankAccount = movementEditorAccountById(candidate.bankAccountId);
+  if (!systemAccount || !bankAccount || candidate.systemAccountId === candidate.bankAccountId) throw new Error("El cruce ya no está disponible.");
+  const pendingSystemIds = new Set(snapshotPendingMovements(systemAccount.snapshot, "system").map(item => item.id));
+  const pendingBankIds = new Set(snapshotPendingMovements(bankAccount.snapshot, "bank").map(item => item.id));
+  const systemMovements = candidate.systemMovements.map(item => systemAccount.snapshot.sources.system.movements.find(current => current.id === item.id)).filter(Boolean);
+  const bankMovements = candidate.bankMovements.map(item => bankAccount.snapshot.sources.bank.movements.find(current => current.id === item.id)).filter(Boolean);
+  if (systemMovements.length !== candidate.systemMovements.length || bankMovements.length !== candidate.bankMovements.length || systemMovements.some(item => !pendingSystemIds.has(item.id)) || bankMovements.some(item => !pendingBankIds.has(item.id))) {
+    throw new Error("Uno de los movimientos dejó de estar pendiente.");
+  }
+  const systemTotal = roundMoney(systemMovements.reduce((sum, item) => sum + (Number(item.amount) || 0), 0));
+  const bankTotal = roundMoney(bankMovements.reduce((sum, item) => sum + (Number(item.amount) || 0), 0));
+  const invertMovedSigns = Math.sign(systemTotal) !== Math.sign(bankTotal);
+  let targetSnapshot;
+  let resolvedSystem;
+  let resolvedBank;
+  let originName;
+  let adjustedSigns = 0;
+  if (targetSide === "system") {
+    targetSnapshot = systemAccount.snapshot;
+    originName = snapshotWorkspaceName(bankAccount.snapshot);
+    resolvedSystem = systemMovements;
+    resolvedBank = bankMovements.map(movement => {
+      const currentType = movementTypeFromAmount(movement);
+      const targetType = invertMovedSigns ? oppositeMovementType(currentType) : currentType;
+      if (targetType !== currentType) adjustedSigns++;
+      const amounts = movementDebitCredit(movement);
+      return editMovementAcrossSnapshots(accounts.map(account => account.snapshot), {
+        accountId: candidate.bankAccountId,
+        sourceKey: "bank",
+        movementId: movement.id
+      }, {
+        accountId: candidate.systemAccountId,
+        sourceKey: "bank",
+        date: movement.dateKey || toDateKey(reviveStoredDate(movement.date)),
+        type: targetType,
+        amount: Math.max(amounts.debit, amounts.credit),
+        description: movement.description,
+        status: movement.status || ""
+      }).movement;
+    });
+  } else if (targetSide === "bank") {
+    targetSnapshot = bankAccount.snapshot;
+    originName = snapshotWorkspaceName(systemAccount.snapshot);
+    resolvedBank = bankMovements;
+    resolvedSystem = systemMovements.map(movement => {
+      const currentType = movementTypeFromAmount(movement);
+      const targetType = invertMovedSigns ? oppositeMovementType(currentType) : currentType;
+      if (targetType !== currentType) adjustedSigns++;
+      const amounts = movementDebitCredit(movement);
+      return editMovementAcrossSnapshots(accounts.map(account => account.snapshot), {
+        accountId: candidate.systemAccountId,
+        sourceKey: "system",
+        movementId: movement.id
+      }, {
+        accountId: candidate.bankAccountId,
+        sourceKey: "system",
+        date: movement.dateKey || toDateKey(reviveStoredDate(movement.date)),
+        type: targetType,
+        amount: Math.max(amounts.debit, amounts.credit),
+        description: movement.description,
+        status: movement.status || ""
+      }).movement;
+    });
+  } else {
+    throw new Error("Seleccione la cuenta en la que quedará la conciliación.");
+  }
+  targetSnapshot.results ||= createEmptyResults();
+  targetSnapshot.results.reconciliations ||= [];
+  targetSnapshot.results.reconciliations.push(createResolvedCrossReconciliation(targetSnapshot, resolvedSystem, resolvedBank, originName));
+  targetSnapshot.results.processingAt ||= new Date().toISOString();
+  targetSnapshot.savedAt = new Date().toISOString();
+  markMovementEditorAccountsModified(candidate.systemAccountId, candidate.bankAccountId);
+  return { targetAccountId: targetSnapshot.workspace.id, originName, adjustedSigns };
+}
+
+function resolveMovementEditorCross(systemAccountId, systemMovementId, bankAccountId, bankMovementId, targetSide) {
+  const systemAccount = movementEditorAccountById(systemAccountId);
+  const bankAccount = movementEditorAccountById(bankAccountId);
+  if (!systemAccount || !bankAccount) throw new Error("El cruce ya no está disponible.");
+  const systemMovement = systemAccount.snapshot.sources.system.movements.find(item => item.id === systemMovementId);
+  const bankMovement = bankAccount.snapshot.sources.bank.movements.find(item => item.id === bankMovementId);
+  if (!systemMovement || !bankMovement) throw new Error("El cruce ya no está disponible.");
+  return resolveMovementEditorCrossCandidate({
+    systemAccountId,
+    bankAccountId,
+    systemMovements: [systemMovement],
+    bankMovements: [bankMovement]
+  }, targetSide);
+}
+
+function summarizeCrossCandidateMovements(movements) {
+  if (movements.length === 1) return movements[0].description || "";
+  const key = crossGroupDescriptionKey(movements[0]?.description || "");
+  return `${movements.length} movimientos${key ? ` · ${key}` : ""}`;
+}
+
+function renderMovementEditorSummary() {
+  const editor = state.movementEditor;
+  const accountMetrics = editor.accounts.map(account => ({ account, metrics: movementEditorAccountMetrics(account.snapshot) }));
+  const totalAccounts = accountMetrics.length;
+  const totalSystem = accountMetrics.reduce((sum, entry) => sum + entry.metrics.system.length, 0);
+  const totalBank = accountMetrics.reduce((sum, entry) => sum + entry.metrics.bank.length, 0);
+  const pendingAbsolute = roundMoney(accountMetrics.reduce((sum, entry) => sum + entry.metrics.pendingAbsolute, 0));
+  const query = editor.search;
+  const allCandidates = findCrossAccountCandidates(editor.accounts);
+  editor.crossCandidates = new Map(allCandidates.map(candidate => [candidate.id, candidate]));
+  const candidates = query ? allCandidates.filter(item => [
+    snapshotWorkspaceName(item.systemSnapshot), snapshotWorkspaceName(item.bankSnapshot),
+    ...item.systemMovements.map(movement => movement.description),
+    ...item.bankMovements.map(movement => movement.description),
+    item.systemMagnitude, item.bankMagnitude
+  ].join(" ").toLowerCase().includes(query)) : allCandidates;
+  dom.movementEditorContent.innerHTML = `
+    <div class="movement-summary-heading"><div><h3>Resumen de conciliaciones</h3><p>Vista consolidada de pendientes. Los cruces sugeridos comparan movimientos del sistema de una cuenta con movimientos de caja o banco de otra.</p></div><span>${totalAccounts} cuenta(s)</span></div>
+    <div class="movement-summary-cards">
+      <article><span>Cuentas cargadas</span><strong>${totalAccounts}</strong></article>
+      <article><span>Pendientes del sistema</span><strong>${totalSystem.toLocaleString("es-UY")}</strong></article>
+      <article><span>Pendientes de caja/banco</span><strong>${totalBank.toLocaleString("es-UY")}</strong></article>
+      <article><span>Importe pendiente absoluto</span><strong>${formatMoney(pendingAbsolute)}</strong></article>
+    </div>
+    <section class="movement-summary-section">
+      <div class="movement-summary-section-heading"><div><h4>Pendientes por cuenta</h4><p>Abra una cuenta para editar sus filas. Por defecto se muestran únicamente las pendientes.</p></div></div>
+      <div class="movement-editor-table-wrap"><table class="movement-editor-table movement-summary-table">
+        <thead><tr><th>Cuenta</th><th>Sistema</th><th>Caja / banco</th><th>Débitos pendientes</th><th>Créditos pendientes</th><th>Total absoluto</th><th></th></tr></thead>
+        <tbody>${accountMetrics.length ? accountMetrics.map(({ account, metrics }) => {
+          const debit = metrics.systemTotals.debit + metrics.bankTotals.debit;
+          const credit = metrics.systemTotals.credit + metrics.bankTotals.credit;
+          const modified = movementEditorAccountIsModified(account.snapshot.workspace.id);
+          return `<tr><td class="movement-summary-account"><strong>${escapeHtml(snapshotWorkspaceName(account.snapshot))}</strong>${modified ? `<small><i data-lucide="circle-dot"></i> Cambios sin descargar</small>` : ""}</td><td>${metrics.system.length.toLocaleString("es-UY")}</td><td>${metrics.bank.length.toLocaleString("es-UY")}</td><td class="amount">${formatMoney(debit)}</td><td class="amount negative">${formatMoney(credit)}</td><td class="amount">${formatMoney(metrics.pendingAbsolute)}</td><td class="movement-editor-actions"><button class="button button-secondary button-small" data-open-summary-account="${escapeAttribute(account.snapshot.workspace.id)}" type="button"><i data-lucide="table-pen"></i> Editar</button></td></tr>`;
+        }).join("") : `<tr><td colspan="7" class="account-empty-group">Agregue conciliaciones XLSX para ver el resumen.</td></tr>`}</tbody>
+      </table></div>
+    </section>
+    <section class="movement-summary-section">
+      <div class="movement-summary-section-heading"><div><h4>Cruces posibles entre cuentas</h4><p>Al resolver un cruce, el movimiento se traslada a la cuenta elegida y queda conciliado allí. Ambos archivos se marcarán para descargar.</p></div><span>${candidates.length} sugerencia(s)</span></div>
+      <div class="movement-editor-table-wrap"><table class="movement-editor-table movement-cross-table">
+        <thead><tr><th>Sistema</th><th>Caja / banco</th><th>Fecha</th><th>Importe</th><th>Coincidencia</th><th>Resolver en</th></tr></thead>
+        <tbody>${candidates.length ? candidates.map(candidate => {
+          const systemDescription = summarizeCrossCandidateMovements(candidate.systemMovements);
+          const bankDescription = summarizeCrossCandidateMovements(candidate.bankMovements);
+          const systemDate = candidate.systemMovements[0].dateKey || toDateKey(reviveStoredDate(candidate.systemMovements[0].date));
+          return `<tr>
+          <td><strong>${escapeHtml(snapshotWorkspaceName(candidate.systemSnapshot))}</strong><span class="cross-description" title="${escapeAttribute(candidate.systemMovements.map(item => item.description).join(" | "))}">${escapeHtml(systemDescription)}</span></td>
+          <td><strong>${escapeHtml(snapshotWorkspaceName(candidate.bankSnapshot))}</strong><span class="cross-description" title="${escapeAttribute(candidate.bankMovements.map(item => item.description).join(" | "))}">${escapeHtml(bankDescription)}</span></td>
+          <td>${formatDateInput(systemDate)}${candidate.dateDifference ? `<small>${candidate.dateDifference} día(s)</small>` : ""}</td>
+          <td class="amount">${formatMoney(candidate.systemMagnitude)}${candidate.amountDifference ? `<small>Dif. ${formatMoney(candidate.amountDifference)}</small>` : ""}</td>
+          <td><span class="cross-score">${candidate.score}%</span><small>${candidate.type === "one-to-one" ? "Uno a uno" : candidate.type === "many-to-one" ? `${candidate.systemMovements.length} a uno` : `Uno a ${candidate.bankMovements.length}`}${candidate.signCorrectionNeeded ? " · corrige signo" : ""}</small></td>
+          <td><div class="cross-actions"><button class="button button-secondary button-small" data-resolve-cross="system" data-cross-id="${escapeAttribute(candidate.id)}" type="button">${escapeHtml(snapshotWorkspaceName(candidate.systemSnapshot))}</button><button class="button button-secondary button-small" data-resolve-cross="bank" data-cross-id="${escapeAttribute(candidate.id)}" type="button">${escapeHtml(snapshotWorkspaceName(candidate.bankSnapshot))}</button></div></td>
+        </tr>`;
+        }).join("") : `<tr><td colspan="6" class="account-empty-group">No se encontraron coincidencias claras entre cuentas con el filtro actual.</td></tr>`}</tbody>
+      </table></div>
+    </section>`;
+  dom.movementEditorContent.querySelectorAll("[data-open-summary-account]").forEach(button => button.addEventListener("click", () => {
+    editor.selectedAccountId = button.dataset.openSummaryAccount;
+    editor.page = 1;
+    renderMovementEditor();
+  }));
+  dom.movementEditorContent.querySelectorAll("[data-resolve-cross]").forEach(button => button.addEventListener("click", () => {
+    try {
+      const candidate = editor.crossCandidates.get(button.dataset.crossId);
+      const result = resolveMovementEditorCrossCandidate(candidate, button.dataset.resolveCross);
+      renderMovementEditor();
+      const signNote = result.adjustedSigns ? ` Se corrigió el signo de ${result.adjustedSigns} movimiento(s).` : "";
+      showToast("Cruce resuelto", `Los movimientos quedaron conciliados en ${snapshotWorkspaceName(movementEditorAccountById(result.targetAccountId).snapshot)}.${signNote}`, "success", 7500);
+    } catch (error) {
+      showToast("No se pudo resolver", error.message || "El cruce dejó de estar disponible.", "error");
+    }
+  }));
+  dom.movementEditorPagination.innerHTML = `<span>${totalSystem + totalBank} pendientes en ${totalAccounts} cuenta(s)</span>`;
+}
+
 function renderMovementEditor() {
   const editor = state.movementEditor;
   const selected = movementEditorAccountById(editor.selectedAccountId);
+  const summaryActive = editor.selectedAccountId === MOVEMENT_EDITOR_SUMMARY_ID;
   dom.movementEditorAccounts.innerHTML = editor.accounts.length
-    ? `<div class="movement-editor-account-list">${editor.accounts.map(account => {
+    ? `<div class="movement-editor-account-list"><button class="movement-editor-account movement-editor-summary-account ${summaryActive ? "active" : ""}" type="button" data-movement-summary><strong>Resumen conjunto</strong><span>${editor.accounts.length}</span><small>Pendientes y cruces entre cuentas</small></button>${editor.accounts.map(account => {
         const snapshot = account.snapshot;
-        const systemCount = snapshot.sources?.system?.movements?.length || 0;
-        const bankCount = snapshot.sources?.bank?.movements?.length || 0;
-        return `<button class="movement-editor-account ${snapshot.workspace.id === editor.selectedAccountId ? "active" : ""}" type="button" data-movement-account="${escapeAttribute(snapshot.workspace.id)}"><strong>${escapeHtml(snapshotWorkspaceName(snapshot))}</strong><span>${(systemCount + bankCount).toLocaleString("es-UY")}</span><small>${systemCount.toLocaleString("es-UY")} sistema · ${bankCount.toLocaleString("es-UY")} caja/banco</small></button>`;
+        const metrics = movementEditorAccountMetrics(snapshot);
+        const modified = movementEditorAccountIsModified(snapshot.workspace.id);
+        return `<button class="movement-editor-account ${snapshot.workspace.id === editor.selectedAccountId ? "active" : ""}" type="button" data-movement-account="${escapeAttribute(snapshot.workspace.id)}"><strong>${escapeHtml(snapshotWorkspaceName(snapshot))}</strong><span>${metrics.pendingCount.toLocaleString("es-UY")}</span><small>${metrics.system.length.toLocaleString("es-UY")} sistema · ${metrics.bank.length.toLocaleString("es-UY")} caja/banco${modified ? " · sin descargar" : ""}</small></button>`;
       }).join("")}</div>`
     : `<div class="movement-editor-empty-accounts"><div><strong>No hay cuentas cargadas</strong><p>Agregue exportaciones de ConciliApp o cree una cuenta vacía.</p></div></div>`;
+  dom.movementEditorAccounts.querySelector("[data-movement-summary]")?.addEventListener("click", () => {
+    editor.selectedAccountId = MOVEMENT_EDITOR_SUMMARY_ID;
+    editor.page = 1;
+    renderMovementEditor();
+  });
   dom.movementEditorAccounts.querySelectorAll("[data-movement-account]").forEach(button => button.addEventListener("click", () => {
     editor.selectedAccountId = button.dataset.movementAccount;
     editor.page = 1;
     renderMovementEditor();
   }));
+  if (summaryActive && editor.accounts.length) {
+    renderMovementEditorSummary();
+    syncMovementEditorButtons();
+    refreshIcons(dom.movementEditorDialog);
+    return;
+  }
   if (!selected) {
-    dom.movementEditorContent.innerHTML = `<div class="movement-editor-placeholder"><div><strong>Seleccione o agregue una cuenta</strong><p>Los cambios se realizan antes de iniciar el proceso de conciliación.</p></div></div>`;
+    dom.movementEditorContent.innerHTML = `<div class="movement-editor-placeholder"><div><strong>Agregue una o más conciliaciones</strong><p>Podrá ver los pendientes de todas juntas y resolver cruces entre cuentas.</p></div></div>`;
     dom.movementEditorPagination.innerHTML = "";
     syncMovementEditorButtons();
     refreshIcons(dom.movementEditorDialog);
@@ -2399,9 +2790,10 @@ function renderMovementEditor() {
   const totalPages = Math.max(1, Math.ceil(rows.length / 100));
   editor.page = clamp(editor.page, 1, totalPages);
   const visible = rows.slice((editor.page - 1) * 100, editor.page * 100);
+  const modified = movementEditorAccountIsModified(snapshot.workspace.id);
   dom.movementEditorContent.innerHTML = `
     <div class="movement-editor-account-heading">
-      <div><h3>${escapeHtml(snapshotWorkspaceName(snapshot))}</h3><p>${rows.length.toLocaleString("es-UY")} movimientos visibles · editar una fila conciliada deshace únicamente su conciliación.</p></div>
+      <div><h3>${escapeHtml(snapshotWorkspaceName(snapshot))}${modified ? `<span class="movement-account-unsaved">Cambios sin descargar</span>` : ""}</h3><p>${rows.length.toLocaleString("es-UY")} movimientos visibles · editar una fila conciliada deshace únicamente su conciliación.</p></div>
       <div class="movement-editor-rename"><input data-movement-account-name type="text" maxlength="80" value="${escapeAttribute(snapshotWorkspaceName(snapshot))}"><button class="button button-secondary button-small" data-save-account-name type="button"><i data-lucide="pencil"></i> Renombrar</button></div>
     </div>
     <div class="movement-editor-table-wrap"><table class="movement-editor-table">
@@ -2420,7 +2812,7 @@ function renderMovementEditor() {
     snapshot.workspace.name = name;
     snapshot.exportFileName = name;
     snapshot.savedAt = new Date().toISOString();
-    editor.dirty = true;
+    markMovementEditorAccountsModified(snapshot.workspace.id);
     renderMovementEditor();
   });
   dom.movementEditorContent.querySelectorAll("[data-edit-movement]").forEach(button => button.addEventListener("click", () => openMovementEditDialog(snapshot.workspace.id, button.dataset.source, button.dataset.id)));
@@ -2443,9 +2835,14 @@ function renderMovementEditorPagination(totalPages, totalRows) {
 
 function syncMovementEditorButtons() {
   const hasSelected = Boolean(movementEditorAccountById(state.movementEditor.selectedAccountId));
-  document.getElementById("downloadMovementAccountBtn").disabled = !hasSelected;
-  document.getElementById("openSelectedMovementAccountBtn").disabled = !hasSelected;
-  document.getElementById("saveMovementAccountsBtn").disabled = !state.movementEditor.accounts.length;
+  const downloadButton = document.getElementById("downloadMovementAccountBtn");
+  if (downloadButton) downloadButton.disabled = !hasSelected;
+  const saveButton = document.getElementById("saveMovementAccountsBtn");
+  if (!saveButton) return;
+  saveButton.disabled = !state.movementEditor.modifiedAccountIds.size;
+  saveButton.innerHTML = state.movementEditor.modifiedAccountIds.size
+    ? `<i data-lucide="save"></i> Guardar cambios (${state.movementEditor.modifiedAccountIds.size})`
+    : `<i data-lucide="save"></i> Guardar cambios`;
 }
 
 function openMovementEditDialog(accountId, sourceKey, movementId) {
@@ -2622,9 +3019,10 @@ function saveMovementEditorEdit(event) {
       description: String(data.get("description") || ""),
       status: String(data.get("status") || "")
     });
-    state.movementEditor.selectedAccountId = String(data.get("accountId"));
+    const destinationAccountId = String(data.get("accountId"));
+    state.movementEditor.selectedAccountId = destinationAccountId;
     state.movementEditor.page = 1;
-    state.movementEditor.dirty = true;
+    markMovementEditorAccountsModified(editing.accountId, destinationAccountId);
     state.movementEditor.editing = null;
     dom.movementEditDialog.close();
     renderMovementEditor();
@@ -2640,7 +3038,7 @@ function deleteMovementEditorMovement() {
   if (!editing) return;
   try {
     const result = deleteMovementAcrossSnapshots(state.movementEditor.accounts.map(account => account.snapshot), editing);
-    state.movementEditor.dirty = true;
+    markMovementEditorAccountsModified(editing.accountId);
     state.movementEditor.editing = null;
     dom.movementEditDialog.close();
     renderMovementEditor();
@@ -2650,36 +3048,25 @@ function deleteMovementEditorMovement() {
   }
 }
 
-async function saveAllMovementEditorAccounts(silent = false) {
-  if (!state.movementEditor.accounts.length) return false;
-  try {
-    for (const account of state.movementEditor.accounts) {
-      const snapshot = account.snapshot;
-      snapshot.workspace.name = snapshotWorkspaceName(snapshot);
-      snapshot.exportFileName ||= snapshot.workspace.name;
-      snapshot.savedAt = new Date().toISOString();
-      await persistSnapshot(snapshot, workspaceStorageKey(snapshot.workspace.id));
-    }
-    state.movementEditor.dirty = false;
-    await populateMovementEditorSavedSelect();
-    if (!silent) showToast("Cuentas guardadas", "Todos los cambios quedaron guardados localmente.", "success");
-    return true;
-  } catch (error) {
-    console.error(error);
-    showToast("No se pudieron guardar", error.message || "El navegador no permitió completar el guardado.", "error");
+function openMovementEditorAccountForReconciliation(accountId) {
+  const account = movementEditorAccountById(accountId);
+  if (!account) return false;
+  if (!snapshotHasProgress(account.snapshot)) {
+    showToast("Cuenta vacía", "Agregue al menos un movimiento antes de abrirla como conciliación.", "error");
     return false;
   }
-}
-
-async function openSelectedMovementEditorAccount() {
-  const account = movementEditorAccountById(state.movementEditor.selectedAccountId);
-  if (!account) return;
-  if (!snapshotHasProgress(account.snapshot)) return showToast("Cuenta vacía", "Agregue al menos un movimiento antes de abrirla como conciliación.", "error");
-  if (!await saveAllMovementEditorAccounts(true)) return;
-  await persistSnapshot(account.snapshot);
+  dom.movementEditorSaveDialog?.open && dom.movementEditorSaveDialog.close();
   closeMovementEditor();
   restoreStateSnapshot(account.snapshot);
+  persistCurrentState();
   showToast("Cuenta abierta", `${snapshotWorkspaceName(account.snapshot)} quedó como conciliación activa.`, "success");
+  return true;
+}
+
+function openPostSaveMovementAccount() {
+  const accountId = state.movementEditor.postSaveAccountId;
+  if (!accountId) return;
+  openMovementEditorAccountForReconciliation(accountId);
 }
 
 function movementEditExportRow(item) {
@@ -2709,34 +3096,80 @@ function snapshotMovementEditorExportRow(movement) {
   return [movement.row || "", movement.dateKey ? formatDateInput(movement.dateKey) : formatDate(reviveStoredDate(movement.date)), movement.description || "", amounts.debit, amounts.credit, movementTypeLabel(amounts.credit > 0 ? "credit" : "debit"), movement.status || "", movement.id || ""];
 }
 
+function buildMovementEditorWorkbook(snapshot) {
+  const workbook = XLSX.utils.book_new();
+  const summary = XLSX.utils.aoa_to_sheet([
+    ["Cuenta", snapshotWorkspaceName(snapshot)],
+    ["Movimientos del sistema", snapshot.sources.system.movements.length],
+    ["Movimientos de caja o banco", snapshot.sources.bank.movements.length],
+    ["Conciliaciones conservadas", snapshot.results?.reconciliations?.length || 0],
+    ["Ediciones registradas", snapshot.movementEditLog?.length || 0],
+    ["Generado", formatDateTime(new Date())]
+  ]);
+  appendSheet(workbook, summary, "Resumen edición");
+  const headers = ["Fila original", "Fecha", "Descripción", "Débito", "Crédito", "Tipo", "Estado original", "ID"];
+  appendSheet(workbook, createStyledDataSheet(headers, snapshot.sources.system.movements.map(snapshotMovementEditorExportRow), { fill: "EDF5FA", numericColumns: [3, 4] }), "Movimientos del sistema");
+  appendSheet(workbook, createStyledDataSheet(headers, snapshot.sources.bank.movements.map(snapshotMovementEditorExportRow), { fill: "E9F5ED", numericColumns: [3, 4] }), "Movimientos caja o banco");
+  if ((snapshot.transferLog || []).length) {
+    const transferHeaders = ["Dirección", "Fecha y hora", "Cuenta origen", "Cuenta destino", "Origen del movimiento", "Fila original", "Fecha del movimiento", "Descripción", "Tipo original", "Tipo en destino", "Débito", "Crédito", "ID original", "ID en destino"];
+    appendSheet(workbook, createStyledDataSheet(transferHeaders, snapshot.transferLog.map(transferExportRow), { fill: "EDF5FA", numericColumns: [10, 11] }), "Movimientos transferidos");
+  }
+  if ((snapshot.movementEditLog || []).length) {
+    appendSheet(workbook, createStyledDataSheet(["Acción", "Fecha y hora", "Cuenta origen", "Cuenta destino", "Origen anterior", "Origen nuevo", "ID anterior", "ID nuevo", "Fecha anterior", "Fecha nueva", "Descripción anterior", "Descripción nueva", "Tipo anterior", "Tipo nuevo", "Importe anterior", "Importe nuevo", "Conciliaciones deshechas"], snapshot.movementEditLog.map(movementEditExportRow), { fill: "F3F0EB", numericColumns: [14, 15, 16] }), "Ediciones de movimientos");
+  }
+  appendSheet(workbook, createApplicationStateSheet(snapshot), STATE_SHEET_NAME);
+  hideWorkbookSheet(workbook, STATE_SHEET_NAME);
+  return workbook;
+}
+
+function downloadMovementEditorSnapshot(snapshot) {
+  const workbook = buildMovementEditorWorkbook(snapshot);
+  const output = XLSX.write(workbook, { compression: true, bookType: "xlsx", type: "array", cellStyles: true });
+  downloadBlob(new Blob([output], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), normalizeExportFileName(snapshotWorkspaceName(snapshot)));
+}
+
 function downloadSelectedMovementEditorAccount() {
   const account = movementEditorAccountById(state.movementEditor.selectedAccountId);
   if (!account) return;
   if (typeof XLSX === "undefined") return showToast("Lector de Excel no disponible", "Vuelva a abrir la aplicación con conexión a Internet.", "error");
   try {
-    const snapshot = account.snapshot;
-    const workbook = XLSX.utils.book_new();
-    const summary = XLSX.utils.aoa_to_sheet([
-      ["Cuenta", snapshotWorkspaceName(snapshot)],
-      ["Movimientos del sistema", snapshot.sources.system.movements.length],
-      ["Movimientos de caja o banco", snapshot.sources.bank.movements.length],
-      ["Conciliaciones conservadas", snapshot.results?.reconciliations?.length || 0],
-      ["Ediciones registradas", snapshot.movementEditLog?.length || 0],
-      ["Generado", formatDateTime(new Date())]
-    ]);
-    appendSheet(workbook, summary, "Resumen edición");
-    const headers = ["Fila original", "Fecha", "Descripción", "Débito", "Crédito", "Tipo", "Estado original", "ID"];
-    appendSheet(workbook, createStyledDataSheet(headers, snapshot.sources.system.movements.map(snapshotMovementEditorExportRow), { fill: "EDF5FA", numericColumns: [3, 4] }), "Movimientos del sistema");
-    appendSheet(workbook, createStyledDataSheet(headers, snapshot.sources.bank.movements.map(snapshotMovementEditorExportRow), { fill: "E9F5ED", numericColumns: [3, 4] }), "Movimientos caja o banco");
-    if ((snapshot.movementEditLog || []).length) appendSheet(workbook, createStyledDataSheet(["Acción", "Fecha y hora", "Cuenta origen", "Cuenta destino", "Origen anterior", "Origen nuevo", "ID anterior", "ID nuevo", "Fecha anterior", "Fecha nueva", "Descripción anterior", "Descripción nueva", "Tipo anterior", "Tipo nuevo", "Importe anterior", "Importe nuevo", "Conciliaciones deshechas"], snapshot.movementEditLog.map(movementEditExportRow), { fill: "F3F0EB", numericColumns: [14, 15, 16] }), "Ediciones de movimientos");
-    appendSheet(workbook, createApplicationStateSheet(snapshot), STATE_SHEET_NAME);
-    hideWorkbookSheet(workbook, STATE_SHEET_NAME);
-    const output = XLSX.write(workbook, { compression: true, bookType: "xlsx", type: "array", cellStyles: true });
-    downloadBlob(new Blob([output], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), normalizeExportFileName(snapshotWorkspaceName(snapshot)));
+    downloadMovementEditorSnapshot(account.snapshot);
     showToast("Cuenta descargada", "El archivo conserva el estado corregido y puede volver a abrirse en ConciliApp.", "success");
   } catch (error) {
     console.error(error);
     showToast("No se pudo descargar", error.message || "No fue posible generar el archivo.", "error");
+  }
+}
+
+function saveMovementEditorChanges() {
+  if (typeof XLSX === "undefined") return showToast("Lector de Excel no disponible", "Vuelva a abrir la aplicación con conexión a Internet.", "error");
+  const editor = state.movementEditor;
+  const modifiedAccounts = editor.accounts.filter(account => editor.modifiedAccountIds.has(account.snapshot.workspace.id));
+  if (!modifiedAccounts.length) return showToast("No hay cambios", "Edite o mueva algún movimiento antes de guardar.", "error");
+  try {
+    const downloadedIds = [];
+    for (const account of modifiedAccounts) {
+      account.snapshot.workspace.name = snapshotWorkspaceName(account.snapshot);
+      account.snapshot.exportFileName ||= account.snapshot.workspace.name;
+      account.snapshot.savedAt = new Date().toISOString();
+      downloadMovementEditorSnapshot(account.snapshot);
+      downloadedIds.push(account.snapshot.workspace.id);
+    }
+    for (const accountId of downloadedIds) editor.modifiedAccountIds.delete(accountId);
+    editor.dirty = editor.modifiedAccountIds.size > 0;
+    renderMovementEditor();
+    if (modifiedAccounts.length === 1) {
+      const account = modifiedAccounts[0];
+      editor.postSaveAccountId = account.snapshot.workspace.id;
+      document.getElementById("movementEditorSaveMessage").textContent = `${snapshotWorkspaceName(account.snapshot)} se descargó con las ediciones aplicadas.`;
+      dom.movementEditorSaveDialog.showModal();
+      refreshIcons(dom.movementEditorSaveDialog);
+    } else {
+      showToast("Archivos descargados", `Se descargaron ${modifiedAccounts.length} conciliaciones con sus cambios correspondientes.`, "success", 7500);
+    }
+  } catch (error) {
+    console.error(error);
+    showToast("No se pudieron guardar los cambios", error.message || "No fue posible generar los archivos corregidos.", "error", 9000);
   }
 }
 
@@ -5370,6 +5803,42 @@ async function clearPersistedState() {
   database.close();
 }
 
+async function clearAllPersistedState() {
+  if (!window.indexedDB) return;
+  const database = await openLocalStateDatabase();
+  await new Promise((resolve, reject) => {
+    const transaction = database.transaction(LOCAL_STATE_STORE, "readwrite");
+    transaction.objectStore(LOCAL_STATE_STORE).clear();
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error || new Error("No se pudo limpiar la sesión local."));
+    transaction.onabort = () => reject(transaction.error || new Error("Se canceló la limpieza de la sesión local."));
+  });
+  database.close();
+}
+
+async function purgeArchivedWorkspaceSnapshots() {
+  if (!window.indexedDB) return;
+  try {
+    const database = await openLocalStateDatabase();
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction(LOCAL_STATE_STORE, "readwrite");
+      const store = transaction.objectStore(LOCAL_STATE_STORE);
+      const request = store.getAllKeys();
+      request.onsuccess = () => {
+        for (const key of request.result || []) {
+          if (String(key).startsWith("workspace:")) store.delete(key);
+        }
+      };
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error || new Error("No se pudo depurar el historial local."));
+      transaction.onabort = () => reject(transaction.error || new Error("Se canceló la depuración local."));
+    });
+    database.close();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
 async function readSavedWorkspaceSnapshots() {
   const database = await openLocalStateDatabase();
   const entries = await new Promise((resolve, reject) => {
@@ -5405,7 +5874,6 @@ async function persistCurrentState() {
       return;
     }
     await persistSnapshot(snapshot);
-    await persistSnapshot(snapshot, workspaceStorageKey(snapshot.workspace.id));
     state.persistence.lastSavedAt = new Date();
     state.persistence.saveErrorShown = false;
     updateLocalSaveStatus("Progreso guardado localmente");
@@ -5952,6 +6420,11 @@ window.ReconciliationApp = Object.freeze({
   extractStateSnapshotFromWorkbook,
   normalizeTransferSnapshot,
   snapshotPendingMovements,
+  movementEditorAccountMetrics,
+  findCrossAccountCandidates,
+  resolveMovementEditorCross,
+  resolveMovementEditorCrossCandidate,
+  createResolvedCrossReconciliation,
   applyTransferTargetType,
   moveSnapshotMovement,
   invalidateSnapshotMovementReconciliations,
@@ -5962,6 +6435,8 @@ window.ReconciliationApp = Object.freeze({
   readPersistedSnapshot,
   readSavedWorkspaceSnapshots,
   clearPersistedState,
+  clearAllPersistedState,
+  purgeArchivedWorkspaceSnapshots,
   exportWorkbook,
   getState: () => state
 });

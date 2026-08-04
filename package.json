@@ -1,7 +1,7 @@
 {
   "name": "conciliapp",
   "private": true,
-  "version": "2026.8.4-3",
+  "version": "2026.8.4-4",
   "scripts": {
     "test": "node tests/reconciliation-engine.test.js"
   }

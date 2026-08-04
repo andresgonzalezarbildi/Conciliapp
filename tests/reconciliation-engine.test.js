@@ -38,6 +38,7 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync(require('path').join(__dirname, '..', 'app.js'), 'utf8'), context, { filename: 'app.js' });
 const app = context.ReconciliationApp;
 assert(app, 'exports missing');
+assert.equal(app.getState().movementEditor.statusFilter, 'pending', 'movement editor must open with pending movements');
 
 const day = d => new Date(`${d}T12:00:00Z`).getTime();
 const mov = (id, source, date, description, amount) => ({ id, source, row: 1, dateTime: day(date), description, amount, type: amount >= 0 ? 'debit' : 'credit' });
@@ -190,6 +191,97 @@ const mov = (id, source, date, description, amount) => ({ id, source, row: 1, da
   });
   assert.equal(editorItau.sources.bank.movements.length, 0, 'editor delete failed');
   assert.equal(deleted.movement.description, 'UTE débito corregido');
+
+  const crossSystemAccount = {
+    schemaVersion: 1,
+    workspace: { id: 'cross-system-account', name: 'ITAU pesos' },
+    exportFileName: 'ITAU pesos',
+    sources: {
+      system: { movements: [{ id:'cross-system-movement', source:'system', row:10, date:'2026-07-17T00:00:00.000Z', dateKey:'2026-07-17', description:'UTE pago factura julio', amount:287227.43, debitAmount:287227.43, creditAmount:0, type:'debit', status:'' }] },
+      bank: { movements: [] }
+    },
+    results: { reconciliations: [], nextId: 1 },
+    review: { periodFilter: { from:'', to:'' } },
+    transferLog: [],
+    movementEditLog: []
+  };
+  const crossBankAccount = {
+    schemaVersion: 1,
+    workspace: { id: 'cross-bank-account', name: 'Caja pesos' },
+    exportFileName: 'Caja pesos',
+    sources: {
+      system: { movements: [] },
+      bank: { movements: [{ id:'cross-bank-movement', source:'bank', row:47, date:'2026-07-17T00:00:00.000Z', dateKey:'2026-07-17', description:'Recibo P UTE', amount:287227.43, debitAmount:287227.43, creditAmount:0, type:'debit', status:'' }] }
+    },
+    results: { reconciliations: [], nextId: 1 },
+    review: { periodFilter: { from:'', to:'' } },
+    transferLog: [],
+    movementEditLog: []
+  };
+  const crossCandidates = app.findCrossAccountCandidates([{ snapshot: crossSystemAccount }, { snapshot: crossBankAccount }]);
+  assert.equal(crossCandidates.length, 1, 'cross-account pending match was not detected');
+  assert.equal(crossCandidates[0].systemAccountId, 'cross-system-account');
+  assert.equal(crossCandidates[0].bankAccountId, 'cross-bank-account');
+
+  const runtimeState = app.getState();
+  runtimeState.movementEditor.accounts = [{ snapshot: crossSystemAccount }, { snapshot: crossBankAccount }];
+  runtimeState.movementEditor.modifiedAccountIds = new Set();
+  runtimeState.movementEditor.selectedAccountId = '__summary__';
+  const crossResolution = app.resolveMovementEditorCross('cross-system-account', 'cross-system-movement', 'cross-bank-account', 'cross-bank-movement', 'system');
+  assert.equal(crossResolution.targetAccountId, 'cross-system-account');
+  assert.equal(crossBankAccount.sources.bank.movements.length, 0, 'cross resolution did not remove movement from origin account');
+  assert.equal(crossSystemAccount.sources.bank.movements.length, 1, 'cross resolution did not move bank movement to target account');
+  assert.equal(crossSystemAccount.results.reconciliations.length, 1, 'cross resolution did not create reconciliation');
+  assert.equal(crossSystemAccount.results.reconciliations[0].status, 'confirmed');
+  assert.equal(crossSystemAccount.results.reconciliations[0].crossAccountResolved, true);
+  assert(runtimeState.movementEditor.modifiedAccountIds.has('cross-system-account'), 'target account not marked for download');
+  assert(runtimeState.movementEditor.modifiedAccountIds.has('cross-bank-account'), 'origin account not marked for download');
+
+  const groupedSystemAccount = {
+    schemaVersion: 1,
+    workspace: { id: 'grouped-system-account', name: 'ITAU pesos agrupado' },
+    exportFileName: 'ITAU pesos agrupado',
+    sources: {
+      system: { movements: [
+        { id:'ute-1', source:'system', row:1, date:'2026-07-17T00:00:00.000Z', dateKey:'2026-07-17', description:'Ute', amount:1000, debitAmount:1000, creditAmount:0, type:'debit', status:'' },
+        { id:'ute-2', source:'system', row:2, date:'2026-07-17T00:00:00.000Z', dateKey:'2026-07-17', description:'Ute', amount:500, debitAmount:500, creditAmount:0, type:'debit', status:'' },
+        { id:'ute-3', source:'system', row:3, date:'2026-07-17T00:00:00.000Z', dateKey:'2026-07-17', description:'Ute rediva', amount:-100, debitAmount:0, creditAmount:100, type:'credit', status:'' }
+      ] },
+      bank: { movements: [] }
+    },
+    results: { reconciliations: [], nextId: 1 },
+    review: { periodFilter: { from:'', to:'' } },
+    transferLog: [], movementEditLog: []
+  };
+  const groupedBankAccount = {
+    schemaVersion: 1,
+    workspace: { id: 'grouped-bank-account', name: 'Caja pesos agrupado' },
+    exportFileName: 'Caja pesos agrupado',
+    sources: {
+      system: { movements: [] },
+      bank: { movements: [{ id:'ute-bank', source:'bank', row:47, date:'2026-07-17T00:00:00.000Z', dateKey:'2026-07-17', description:'Recibo P UTE', amount:-1400, debitAmount:0, creditAmount:1400, type:'credit', status:'' }] }
+    },
+    results: { reconciliations: [], nextId: 1 },
+    review: { periodFilter: { from:'', to:'' } },
+    transferLog: [], movementEditLog: []
+  };
+  const groupedAccounts = [{ snapshot: groupedSystemAccount }, { snapshot: groupedBankAccount }];
+  const groupedCandidates = app.findCrossAccountCandidates(groupedAccounts);
+  const groupedCandidate = groupedCandidates.find(item => item.systemMovements.length === 3 && item.bankMovements.length === 1);
+  assert(groupedCandidate, 'grouped cross-account candidate was not detected');
+  assert.equal(groupedCandidate.signCorrectionNeeded, true, 'opposite sign was not flagged');
+  runtimeState.movementEditor.accounts = groupedAccounts;
+  runtimeState.movementEditor.modifiedAccountIds = new Set();
+  const groupedResolution = app.resolveMovementEditorCrossCandidate(groupedCandidate, 'system');
+  assert.equal(groupedResolution.adjustedSigns, 1, 'destination sign was not corrected');
+  const groupedReconciliation = groupedSystemAccount.results.reconciliations[0];
+  assert.equal(groupedReconciliation.systemIds.length, 3);
+  assert.equal(groupedReconciliation.bankIds.length, 1);
+  assert.equal(groupedReconciliation.totalSystem, 1400);
+  assert.equal(groupedReconciliation.totalBank, 1400);
+  assert.equal(groupedReconciliation.difference, 0);
+  assert.equal(groupedSystemAccount.sources.bank.movements[0].type, 'debit');
+  assert.equal(groupedSystemAccount.sources.bank.movements[0].amount, 1400);
 
   console.log('All tests passed');
 })().catch(err => { console.error(err); process.exit(1); });
