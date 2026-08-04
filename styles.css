@@ -452,6 +452,9 @@ p { color: var(--muted); }
 .pending-col-type { width: 64px; }
 .pending-col-amount { width: 94px; }
 .pending-description { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pending-description > span { display: block; overflow: hidden; text-overflow: ellipsis; }
+.movement-origin-badge { display: inline-flex; align-items: center; gap: 3px; margin-top: 2px; color: var(--blue); font-size: 9px; font-weight: 700; }
+.movement-origin-badge svg { width: 10px; height: 10px; }
 .pending-table .type-badge { max-width: 58px; overflow: hidden; text-overflow: ellipsis; }
 .pending-table .amount { font-size: 11px; }
 .pending-table input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--primary); }
@@ -546,6 +549,39 @@ p { color: var(--muted); }
 .period-trim-note { color: var(--blue); background: #edf5fa; border-color: #cbdfea; }
 .period-trim-body .retry-summary small { color: var(--muted); }
 
+.modal-extra-wide { width: min(1220px, calc(100vw - 24px)); }
+.account-transfer-card { width: min(1180px, calc(100vw - 28px)); max-height: min(900px, calc(100vh - 28px)); overflow: hidden; }
+.account-transfer-loader { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto auto; align-items: end; gap: 10px; padding: 16px 22px; border-bottom: 1px solid var(--line); background: var(--surface-muted); }
+.account-loader-separator { align-self: center; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.account-transfer-content { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; min-height: 360px; max-height: 58vh; padding: 16px 22px; overflow: auto; background: #f8fafa; }
+.account-transfer-placeholder { grid-column: 1 / -1; display: grid; place-items: center; min-height: 330px; padding: 34px; color: var(--muted); text-align: center; border: 1px dashed var(--line-strong); border-radius: 7px; background: white; }
+.account-panel { min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 7px; background: white; }
+.account-panel.is-drop-target { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(22, 78, 85, .12); }
+.account-panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.account-panel-heading h3 { margin: 0; font-size: 15px; }
+.account-panel-heading span { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
+.account-panel-count { flex: 0 0 auto; padding: 4px 7px; color: var(--primary); background: var(--primary-soft); border-radius: 99px; font-size: 10px; font-weight: 750; }
+.account-panel .search-field { margin-bottom: 10px; }
+.account-movement-group { margin-top: 10px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.account-movement-group-heading { display: flex; align-items: center; justify-content: space-between; padding: 7px 9px; background: var(--surface-muted); border-bottom: 1px solid var(--line); }
+.account-movement-group-heading strong { font-size: 10px; letter-spacing: .035em; text-transform: uppercase; }
+.account-movement-group-heading span { color: var(--muted); font-size: 10px; }
+.account-movement-list { display: grid; max-height: 230px; overflow: auto; }
+.account-movement-row { display: grid; grid-template-columns: 24px 76px minmax(0, 1fr) 112px; align-items: center; gap: 7px; padding: 7px 8px; border-bottom: 1px solid #edf0f0; cursor: grab; }
+.account-movement-row:last-child { border-bottom: 0; }
+.account-movement-row:hover, .account-movement-row.selected { background: #f0f6f6; }
+.account-movement-row.dragging { opacity: .45; }
+.account-movement-row small { color: var(--muted); font-size: 9px; }
+.account-movement-description { display: grid; min-width: 0; gap: 2px; overflow: hidden; font-size: 11px; }
+.account-movement-description > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cross-account-suggested { box-shadow: inset 3px 0 0 #c69a26; }
+.cross-account-match { display: inline-flex; align-items: center; gap: 3px; width: max-content; color: #8a6412; font-size: 9px; font-style: normal; font-weight: 700; }
+.cross-account-match svg { width: 11px; height: 11px; }
+.account-movement-amount { text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; }
+.account-empty-group { padding: 18px 10px; color: var(--muted); text-align: center; font-size: 10px; }
+.account-transfer-actions { display: flex; justify-content: center; gap: 10px; padding: 0 22px 15px; background: #f8fafa; }
+.transfer-history-note { grid-column: 1 / -1; padding: 8px 10px; color: var(--blue); background: #edf5fa; border: 1px solid #cbdfea; border-radius: 5px; font-size: 10px; }
+
 .toast-region { position: fixed; top: 66px; right: 10px; z-index: 100; display: grid; width: min(300px, calc(100vw - 20px)); gap: 6px; }
 .toast { display: flex; align-items: flex-start; gap: 7px; padding: 8px 10px; background: #23383b; color: white; border-radius: 5px; box-shadow: 0 5px 15px rgba(18, 31, 33, .18); animation: toast-in .18s ease-out; }
 .toast.error { background: #813b3b; }
@@ -598,6 +634,9 @@ p { color: var(--muted); }
   .summary-cards { grid-template-columns: repeat(3, 1fr); }
   .detail-summary { grid-template-columns: repeat(2, 1fr); }
   .proposal-review-actions .button { flex: 1 1 auto; }
+  .account-transfer-loader { grid-template-columns: 1fr 1fr; }
+  .account-loader-separator { display: none; }
+  .account-transfer-content { grid-template-columns: 1fr; max-height: 62vh; }
   .reason-list, .detail-summary { grid-column: 1; }
   .export-main { padding: 32px 22px; }
 }
@@ -637,6 +676,12 @@ p { color: var(--muted); }
   .proposal-review-actions .button { width: 100%; }
   .result-table .result-row { grid-template-columns: 1fr; }
   .result-table .result-row td:nth-child(9) { grid-column: 1; }
+  .account-transfer-loader { grid-template-columns: 1fr; }
+  .account-transfer-loader .button { width: 100%; }
+  .account-transfer-actions { flex-direction: column; }
+  .account-transfer-actions .button { width: 100%; }
+  .account-movement-row { grid-template-columns: 24px 64px minmax(0, 1fr); }
+  .account-movement-amount { grid-column: 2 / -1; }
 }
 
 @media (prefers-reduced-motion: reduce) {

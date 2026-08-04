@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_BUILD = "2026.07.17-8";
+const APP_BUILD = "2026.08.04-1";
 const STATE_SCHEMA_VERSION = 1;
 const STATE_SHEET_NAME = "Estado ConciliApp";
 const STATE_CHUNK_SIZE = 30000;
@@ -21,8 +21,8 @@ const DEFAULT_CONFIG = Object.freeze({
   searchOneToOne: true,
   searchOneToMany: true,
   searchManyToOne: true,
-  allowMixedGroupSigns: true,
-  searchInternalOffsets: true,
+  allowMixedGroupSigns: false,
+  searchInternalOffsets: false,
   considerDescription: true,
   autoThreshold: 70,
   possibleThreshold: 55,
@@ -84,8 +84,31 @@ const state = {
     rejectedProposals: [],
     periodFilter: { from: "", to: "", appliedAt: null }
   },
+  workspace: createWorkspaceState(),
+  accountTransfer: createAccountTransferState(),
+  transferLog: [],
   persistence: { restoring: false, saveTimer: null, saveErrorShown: false, lastSavedAt: null }
 };
+
+function createWorkspaceState(id = "", name = "") {
+  return {
+    id: id || `workspace-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    name: String(name || "").trim()
+  };
+}
+
+function createAccountTransferState() {
+  return {
+    currentSnapshot: null,
+    destinationSnapshot: null,
+    destinationFileName: "",
+    currentSearch: "",
+    destinationSearch: "",
+    selectedCurrent: new Set(),
+    selectedDestination: new Set(),
+    dragPayload: null
+  };
+}
 
 function createEmptySource(key, label) {
   return {
@@ -202,6 +225,10 @@ function cacheDom() {
   dom.retryForm = document.getElementById("retryForm");
   dom.periodTrimDialog = document.getElementById("periodTrimDialog");
   dom.periodTrimForm = document.getElementById("periodTrimForm");
+  dom.accountTransferDialog = document.getElementById("accountTransferDialog");
+  dom.accountTransferContent = document.getElementById("accountTransferContent");
+  dom.accountTransferInput = document.getElementById("accountTransferInput");
+  dom.savedAccountSelect = document.getElementById("savedAccountSelect");
   dom.toastRegion = document.getElementById("toastRegion");
   dom.continueButtons = {
     system: document.getElementById("continueSystemBtn"),
@@ -282,6 +309,19 @@ function bindGlobalEvents() {
   document.getElementById("rejectAllPossibleBtn").addEventListener("click", rejectAllPossible);
   document.getElementById("retryPendingBtn").addEventListener("click", openRetryDialog);
   document.getElementById("trimPeriodBtn").addEventListener("click", openPeriodTrimDialog);
+  document.getElementById("manageAccountsBtn").addEventListener("click", openAccountTransferDialog);
+  document.getElementById("loadAccountTransferBtn").addEventListener("click", () => dom.accountTransferInput.click());
+  dom.accountTransferInput.addEventListener("change", async event => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) await loadDestinationAccountFile(file);
+  });
+  document.getElementById("loadSavedAccountBtn").addEventListener("click", loadSelectedSavedAccount);
+  document.getElementById("moveToDestinationBtn").addEventListener("click", () => moveSelectedAccountMovements("current", "destination"));
+  document.getElementById("moveToCurrentBtn").addEventListener("click", () => moveSelectedAccountMovements("destination", "current"));
+  document.getElementById("saveAccountTransfersBtn").addEventListener("click", saveAccountTransfers);
+  document.getElementById("openDestinationAccountBtn").addEventListener("click", openDestinationAccount);
+  document.querySelectorAll("[data-close-account-transfer]").forEach(button => button.addEventListener("click", () => dom.accountTransferDialog.close()));
   document.querySelectorAll("[data-close-retry]").forEach(button => button.addEventListener("click", () => dom.retryDialog.close()));
   document.querySelectorAll("[data-close-period]").forEach(button => button.addEventListener("click", () => dom.periodTrimDialog.close()));
   dom.retryForm.addEventListener("submit", event => {
@@ -304,6 +344,7 @@ function bindGlobalEvents() {
       if (dom.editGroupDialog.open) dom.editGroupDialog.close();
       if (dom.retryDialog.open) dom.retryDialog.close();
       if (dom.periodTrimDialog.open) dom.periodTrimDialog.close();
+      if (dom.accountTransferDialog.open) dom.accountTransferDialog.close();
     }
   });
   document.addEventListener("visibilitychange", () => {
@@ -1364,6 +1405,10 @@ function renderConfigSummary() {
 }
 
 function resetApplication() {
+  try {
+    const previousSnapshot = createStateSnapshot();
+    if (snapshotHasProgress(previousSnapshot) && window.indexedDB) persistSnapshot(previousSnapshot, workspaceStorageKey(previousSnapshot.workspace.id)).catch(() => {});
+  } catch {}
   clearPersistedState().catch(() => {});
   if (state.persistence.saveTimer) window.clearTimeout(state.persistence.saveTimer);
   state.persistence.saveTimer = null;
@@ -1386,6 +1431,9 @@ function resetApplication() {
     rejectedSignatures: new Set(), rejectedProposals: [],
     periodFilter: { from: "", to: "", appliedAt: null }
   };
+  state.workspace = createWorkspaceState();
+  state.accountTransfer = createAccountTransferState();
+  state.transferLog = [];
   state.persistence.lastSavedAt = null;
   updateLocalSaveStatus("Sin progreso guardado");
   document.querySelectorAll("[data-source-editor]").forEach(editor => {
@@ -1414,12 +1462,12 @@ function resetApplication() {
   syncReviewControls();
   populateConfigForm();
   goToStep(1);
-  showToast("Datos eliminados", "La aplicación quedó lista para una nueva conciliación.", "success");
+  showToast("Nueva conciliación", "La cuenta anterior quedó guardada localmente y la aplicación está lista para comenzar otra.", "success");
 }
 
 function confirmNewReconciliation() {
   const hasData = state.sources.system.file || state.sources.bank.file || state.results.processingAt;
-  if (!hasData || window.confirm("Se eliminarán los archivos, resultados y el progreso guardado en este navegador. ¿Desea continuar?")) resetApplication();
+  if (!hasData || window.confirm("La cuenta actual quedará guardada localmente y se abrirá una conciliación nueva. ¿Desea continuar?")) resetApplication();
 }
 
 function clearReconciliationResultsForSourceChange() {
@@ -1675,6 +1723,373 @@ function restorePeriodExclusions() {
   dom.periodTrimDialog.close();
   renderReview();
   showToast("Período restaurado", `${excluded.toLocaleString("es-UY")} movimientos volvieron a Pendientes.`, "success");
+}
+
+function getCurrentWorkspaceName() {
+  const exportName = document.getElementById("exportFileName")?.value.trim().replace(/\.xlsx$/i, "");
+  const name = exportName || state.workspace?.name || state.sources.bank.name || state.sources.system.name || "Conciliación sin nombre";
+  if (state.workspace) state.workspace.name = name;
+  return name;
+}
+
+function cloneSnapshot(snapshot) {
+  return JSON.parse(JSON.stringify(snapshot));
+}
+
+function normalizeTransferSnapshot(snapshot, fallbackName = "Conciliación") {
+  if (!snapshot || Number(snapshot.schemaVersion) !== STATE_SCHEMA_VERSION || !snapshotHasProgress(snapshot)) throw new Error("La conciliación no contiene un estado compatible.");
+  const normalized = cloneSnapshot(snapshot);
+  normalized.workspace ||= {};
+  normalized.workspace.id ||= `workspace-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  normalized.workspace.name ||= String(normalized.exportFileName || fallbackName).replace(/\.xlsx$/i, "");
+  normalized.sources ||= {};
+  for (const sourceKey of ["system", "bank"]) {
+    normalized.sources[sourceKey] ||= {};
+    normalized.sources[sourceKey].movements ||= [];
+  }
+  normalized.results ||= createEmptyResults();
+  normalized.results.reconciliations ||= [];
+  normalized.transferLog ||= [];
+  normalized.review ||= {};
+  normalized.review.periodFilter ||= { from: "", to: "", appliedAt: null };
+  return normalized;
+}
+
+function snapshotWorkspaceName(snapshot) {
+  return String(snapshot?.workspace?.name || snapshot?.exportFileName || snapshot?.sources?.bank?.name || snapshot?.sources?.system?.name || "Conciliación").replace(/\.xlsx$/i, "");
+}
+
+function snapshotReservedIds(snapshot) {
+  const reserved = { system: new Set(), bank: new Set() };
+  (snapshot?.results?.reconciliations || []).filter(item => item.status === "confirmed" || item.status === "possible").forEach(item => {
+    (item.systemIds || []).forEach(id => reserved.system.add(id));
+    (item.bankIds || []).forEach(id => reserved.bank.add(id));
+  });
+  return reserved;
+}
+
+function snapshotMovementOutsidePeriod(movement, snapshot) {
+  const period = snapshot?.review?.periodFilter || {};
+  const dateKey = movement.dateKey || toDateKey(reviveStoredDate(movement.date));
+  return Boolean((period.from && dateKey < period.from) || (period.to && dateKey > period.to));
+}
+
+function snapshotPendingMovements(snapshot, sourceKey) {
+  const reserved = snapshotReservedIds(snapshot)[sourceKey];
+  return (snapshot?.sources?.[sourceKey]?.movements || []).filter(item => !reserved.has(item.id) && !snapshotMovementOutsidePeriod(item, snapshot));
+}
+
+function findCrossAccountMatch(movement, otherSnapshot) {
+  if (!otherSnapshot) return null;
+  const movementDate = movement.dateKey || toDateKey(reviveStoredDate(movement.date));
+  const amount = Math.abs(Number(movement.amount) || 0);
+  let best = null;
+  for (const sourceKey of ["system", "bank"]) {
+    for (const candidate of otherSnapshot.sources?.[sourceKey]?.movements || []) {
+      const candidateDate = candidate.dateKey || toDateKey(reviveStoredDate(candidate.date));
+      if (movementDate !== candidateDate || Math.abs(amount - Math.abs(Number(candidate.amount) || 0)) > .01) continue;
+      const similarity = descriptionSimilarity(movement.description, candidate.description);
+      if (similarity < .45) continue;
+      if (!best || similarity > best.similarity) best = { candidate, sourceKey, similarity };
+    }
+  }
+  return best;
+}
+
+async function openAccountTransferDialog() {
+  state.accountTransfer = createAccountTransferState();
+  state.accountTransfer.currentSnapshot = normalizeTransferSnapshot(createStateSnapshot(), getCurrentWorkspaceName());
+  await populateSavedAccountSelect();
+  renderAccountTransferDialog();
+  dom.accountTransferDialog.showModal();
+  refreshIcons(dom.accountTransferDialog);
+}
+
+async function populateSavedAccountSelect() {
+  if (!dom.savedAccountSelect) return;
+  dom.savedAccountSelect.innerHTML = `<option value="">Seleccione una cuenta local</option>`;
+  if (!window.indexedDB) return;
+  try {
+    const entries = await readSavedWorkspaceSnapshots();
+    entries
+      .filter(entry => entry.snapshot?.workspace?.id !== state.workspace?.id)
+      .sort((left, right) => snapshotWorkspaceName(left.snapshot).localeCompare(snapshotWorkspaceName(right.snapshot), "es"))
+      .forEach(entry => {
+        const option = document.createElement("option");
+        option.value = String(entry.key);
+        option.textContent = snapshotWorkspaceName(entry.snapshot);
+        dom.savedAccountSelect.append(option);
+      });
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+async function loadSelectedSavedAccount() {
+  const key = dom.savedAccountSelect.value;
+  if (!key) {
+    showToast("Seleccione una cuenta", "Elija una conciliación guardada antes de abrirla.", "error");
+    return;
+  }
+  try {
+    const snapshot = await readPersistedSnapshot(key);
+    state.accountTransfer.destinationSnapshot = normalizeTransferSnapshot(snapshot, "Cuenta destino");
+    state.accountTransfer.destinationFileName = snapshotWorkspaceName(snapshot);
+    state.accountTransfer.selectedDestination.clear();
+    renderAccountTransferDialog();
+  } catch (error) {
+    console.error(error);
+    showToast("No se pudo abrir la cuenta", error.message || "La conciliación guardada no está disponible.", "error");
+  }
+}
+
+async function loadDestinationAccountFile(file) {
+  if (!/\.xlsx$/i.test(file.name || "")) {
+    showToast("Archivo no admitido", "Seleccione un XLSX exportado previamente por ConciliApp.", "error");
+    return;
+  }
+  if (typeof XLSX === "undefined") {
+    showToast("Lector de Excel no disponible", "Vuelva a abrir la aplicación con conexión a Internet.", "error");
+    return;
+  }
+  try {
+    const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: false, dense: false });
+    const snapshot = normalizeTransferSnapshot(extractStateSnapshotFromWorkbook(workbook), file.name.replace(/\.xlsx$/i, ""));
+    if (snapshot.workspace.id === state.accountTransfer.currentSnapshot?.workspace?.id) snapshot.workspace.id = `workspace-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    snapshot.workspace.name ||= file.name.replace(/\.xlsx$/i, "");
+    state.accountTransfer.destinationSnapshot = snapshot;
+    state.accountTransfer.destinationFileName = file.name.replace(/\.xlsx$/i, "");
+    state.accountTransfer.selectedDestination.clear();
+    renderAccountTransferDialog();
+    showToast("Cuenta destino cargada", `${snapshotWorkspaceName(snapshot)} está disponible para mover pendientes.`, "success");
+  } catch (error) {
+    console.error(error);
+    showToast("No se pudo cargar la cuenta", error.message || "El archivo no contiene una conciliación compatible.", "error", 8000);
+  }
+}
+
+function renderAccountTransferDialog() {
+  const transfer = state.accountTransfer;
+  const current = transfer.currentSnapshot;
+  const destination = transfer.destinationSnapshot;
+  document.getElementById("moveToDestinationBtn").disabled = !destination || !transfer.selectedCurrent.size;
+  document.getElementById("moveToCurrentBtn").disabled = !destination || !transfer.selectedDestination.size;
+  document.getElementById("saveAccountTransfersBtn").disabled = !destination;
+  document.getElementById("openDestinationAccountBtn").disabled = !destination;
+  if (!current) {
+    dom.accountTransferContent.innerHTML = `<div class="account-transfer-placeholder">No hay una conciliación actual para administrar.</div>`;
+    return;
+  }
+  if (!destination) {
+    dom.accountTransferContent.innerHTML = `${renderAccountPanel("current", current, transfer.currentSearch)}<div class="account-transfer-placeholder"><div><strong>Cargue la conciliación de la otra cuenta</strong><p>Puede elegir una cuenta guardada localmente o un XLSX exportado. Después podrá arrastrar los movimientos pendientes.</p></div></div>`;
+  } else {
+    dom.accountTransferContent.innerHTML = `${renderAccountPanel("current", current, transfer.currentSearch)}${renderAccountPanel("destination", destination, transfer.destinationSearch)}<div class="transfer-history-note">Al mover una fila se conserva su fecha, importe, descripción y número de fila original. La aplicación le asigna un ID nuevo en la cuenta destino y registra de qué cuenta provino.</div>`;
+  }
+  bindAccountTransferContentEvents();
+  refreshIcons(dom.accountTransferDialog);
+}
+
+function renderAccountPanel(origin, snapshot, search) {
+  const selected = origin === "current" ? state.accountTransfer.selectedCurrent : state.accountTransfer.selectedDestination;
+  const otherSnapshot = origin === "current" ? state.accountTransfer.destinationSnapshot : state.accountTransfer.currentSnapshot;
+  const query = String(search || "").trim().toLowerCase();
+  const groups = ["system", "bank"].map(sourceKey => {
+    const all = snapshotPendingMovements(snapshot, sourceKey);
+    const visible = all.filter(item => !query || movementSearchText({ ...item, date: reviveStoredDate(item.date) }).includes(query));
+    const rows = visible.length ? visible.map(item => {
+      const key = `${sourceKey}:${item.id}`;
+      const date = reviveStoredDate(item.date);
+      const crossMatch = findCrossAccountMatch(item, otherSnapshot);
+      const matchBadge = crossMatch ? `<em class="cross-account-match" title="Misma fecha e importe en ${escapeAttribute(snapshotWorkspaceName(otherSnapshot))}: ${escapeAttribute(crossMatch.candidate.description)}"><i data-lucide="badge-alert"></i> Posible otra cuenta</em>` : "";
+      return `<div class="account-movement-row ${selected.has(key) ? "selected" : ""} ${crossMatch ? "cross-account-suggested" : ""}" draggable="true" data-account-movement data-origin="${origin}" data-source="${sourceKey}" data-id="${escapeAttribute(item.id)}"><input type="checkbox" data-account-select value="${escapeAttribute(key)}" ${selected.has(key) ? "checked" : ""} aria-label="Seleccionar movimiento"><small>${date ? formatDate(date) : escapeHtml(item.dateKey || "")}</small><span class="account-movement-description" title="${escapeAttribute(item.description)}"><span>${escapeHtml(item.description)}</span>${matchBadge}</span><strong class="account-movement-amount ${Number(item.amount) < 0 ? "negative" : ""}">${formatMoney(Number(item.amount) || 0)}</strong></div>`;
+    }).join("") : `<div class="account-empty-group">No hay pendientes para este filtro.</div>`;
+    return `<section class="account-movement-group"><div class="account-movement-group-heading"><strong>${sourceKey === "system" ? "Sistema contable" : "Caja o banco"}</strong><span>${visible.length.toLocaleString("es-UY")} de ${all.length.toLocaleString("es-UY")}</span></div><div class="account-movement-list">${rows}</div></section>`;
+  }).join("");
+  const totalPending = snapshotPendingMovements(snapshot, "system").length + snapshotPendingMovements(snapshot, "bank").length;
+  return `<section class="account-panel" data-account-drop="${origin}"><div class="account-panel-heading"><div><h3>${escapeHtml(snapshotWorkspaceName(snapshot))}</h3><span>${origin === "current" ? "Cuenta actual" : "Cuenta destino"}</span></div><span class="account-panel-count">${totalPending.toLocaleString("es-UY")} pendientes</span></div><label class="search-field"><i data-lucide="search"></i><input data-account-search="${origin}" type="search" value="${escapeAttribute(search || "")}" placeholder="Filtrar movimientos"></label>${groups}</section>`;
+}
+
+function bindAccountTransferContentEvents() {
+  dom.accountTransferContent.querySelectorAll("[data-account-select]").forEach(checkbox => {
+    checkbox.addEventListener("change", event => {
+      const row = event.target.closest("[data-account-movement]");
+      const selected = row.dataset.origin === "current" ? state.accountTransfer.selectedCurrent : state.accountTransfer.selectedDestination;
+      const key = `${row.dataset.source}:${row.dataset.id}`;
+      if (event.target.checked) selected.add(key);
+      else selected.delete(key);
+      renderAccountTransferDialog();
+    });
+  });
+  dom.accountTransferContent.querySelectorAll("[data-account-movement]").forEach(row => {
+    row.addEventListener("click", event => {
+      if (event.target.matches("input")) return;
+      const checkbox = row.querySelector("[data-account-select]");
+      checkbox.checked = !checkbox.checked;
+      checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    row.addEventListener("dragstart", event => {
+      const payload = { origin: row.dataset.origin, sourceKey: row.dataset.source, id: row.dataset.id };
+      state.accountTransfer.dragPayload = payload;
+      row.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", JSON.stringify(payload));
+    });
+    row.addEventListener("dragend", () => {
+      row.classList.remove("dragging");
+      state.accountTransfer.dragPayload = null;
+      dom.accountTransferContent.querySelectorAll(".is-drop-target").forEach(panel => panel.classList.remove("is-drop-target"));
+    });
+  });
+  dom.accountTransferContent.querySelectorAll("[data-account-search]").forEach(input => {
+    input.addEventListener("input", event => {
+      if (event.target.dataset.accountSearch === "current") state.accountTransfer.currentSearch = event.target.value;
+      else state.accountTransfer.destinationSearch = event.target.value;
+      renderAccountTransferDialog();
+    });
+  });
+  dom.accountTransferContent.querySelectorAll("[data-account-drop]").forEach(panel => {
+    panel.addEventListener("dragover", event => {
+      const payload = state.accountTransfer.dragPayload;
+      if (!payload || payload.origin === panel.dataset.accountDrop || !state.accountTransfer.destinationSnapshot) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      panel.classList.add("is-drop-target");
+    });
+    panel.addEventListener("dragleave", event => {
+      if (!panel.contains(event.relatedTarget)) panel.classList.remove("is-drop-target");
+    });
+    panel.addEventListener("drop", event => {
+      event.preventDefault();
+      panel.classList.remove("is-drop-target");
+      let payload = state.accountTransfer.dragPayload;
+      if (!payload) {
+        try { payload = JSON.parse(event.dataTransfer.getData("text/plain")); } catch { payload = null; }
+      }
+      if (!payload || payload.origin === panel.dataset.accountDrop) return;
+      moveSingleAccountMovement(payload.origin, panel.dataset.accountDrop, payload.sourceKey, payload.id);
+    });
+  });
+}
+
+function transferredMovementId(destinationSnapshot, sourceKey) {
+  const existing = new Set((destinationSnapshot.sources?.[sourceKey]?.movements || []).map(item => item.id));
+  let candidate;
+  do candidate = `${sourceKey}-transfer-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  while (existing.has(candidate));
+  return candidate;
+}
+
+function moveSnapshotMovement(originSnapshot, destinationSnapshot, sourceKey, movementId) {
+  if (!originSnapshot || !destinationSnapshot || !["system", "bank"].includes(sourceKey)) return false;
+  const pendingIds = new Set(snapshotPendingMovements(originSnapshot, sourceKey).map(item => item.id));
+  if (!pendingIds.has(movementId)) return false;
+  const movements = originSnapshot.sources[sourceKey].movements;
+  const index = movements.findIndex(item => item.id === movementId);
+  if (index < 0) return false;
+  const [movement] = movements.splice(index, 1);
+  const fromName = snapshotWorkspaceName(originSnapshot);
+  const toName = snapshotWorkspaceName(destinationSnapshot);
+  const movedAt = new Date().toISOString();
+  const moved = {
+    ...movement,
+    id: transferredMovementId(destinationSnapshot, sourceKey),
+    source: sourceKey,
+    transferOriginId: movement.transferOriginId || movement.id,
+    transferOriginAccount: movement.transferOriginAccount || fromName,
+    transferHistory: [
+      ...(Array.isArray(movement.transferHistory) ? movement.transferHistory : []),
+      { fromWorkspaceId: originSnapshot.workspace.id, fromAccount: fromName, toWorkspaceId: destinationSnapshot.workspace.id, toAccount: toName, sourceKey, at: movedAt }
+    ]
+  };
+  destinationSnapshot.sources[sourceKey].movements.push(moved);
+  const transferEntry = {
+    id: `transfer-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    at: movedAt,
+    sourceKey,
+    movementOriginId: movement.transferOriginId || movement.id,
+    movementDestinationId: moved.id,
+    row: movement.row,
+    date: movement.date,
+    dateKey: movement.dateKey,
+    description: movement.description,
+    amount: movement.amount,
+    fromWorkspaceId: originSnapshot.workspace.id,
+    fromAccount: fromName,
+    toWorkspaceId: destinationSnapshot.workspace.id,
+    toAccount: toName
+  };
+  originSnapshot.transferLog ||= [];
+  destinationSnapshot.transferLog ||= [];
+  originSnapshot.transferLog.push({ ...transferEntry, direction: "out" });
+  destinationSnapshot.transferLog.push({ ...transferEntry, direction: "in" });
+  destinationSnapshot.sources[sourceKey].movements.sort((left, right) => String(left.dateKey || left.date).localeCompare(String(right.dateKey || right.date)) || Number(left.row || 0) - Number(right.row || 0));
+  originSnapshot.sources[sourceKey].restoredRowCount = originSnapshot.sources[sourceKey].movements.length;
+  destinationSnapshot.sources[sourceKey].restoredRowCount = destinationSnapshot.sources[sourceKey].movements.length;
+  originSnapshot.savedAt = movedAt;
+  destinationSnapshot.savedAt = movedAt;
+  return true;
+}
+
+function moveSingleAccountMovement(origin, target, sourceKey, movementId) {
+  const originSnapshot = origin === "current" ? state.accountTransfer.currentSnapshot : state.accountTransfer.destinationSnapshot;
+  const destinationSnapshot = target === "current" ? state.accountTransfer.currentSnapshot : state.accountTransfer.destinationSnapshot;
+  if (!moveSnapshotMovement(originSnapshot, destinationSnapshot, sourceKey, movementId)) {
+    showToast("No se pudo mover", "El movimiento ya no está pendiente o fue modificado.", "error");
+    return;
+  }
+  state.accountTransfer.selectedCurrent.clear();
+  state.accountTransfer.selectedDestination.clear();
+  renderAccountTransferDialog();
+}
+
+function moveSelectedAccountMovements(origin, target) {
+  if (!state.accountTransfer.destinationSnapshot) return;
+  const selected = origin === "current" ? state.accountTransfer.selectedCurrent : state.accountTransfer.selectedDestination;
+  const originSnapshot = origin === "current" ? state.accountTransfer.currentSnapshot : state.accountTransfer.destinationSnapshot;
+  const destinationSnapshot = target === "current" ? state.accountTransfer.currentSnapshot : state.accountTransfer.destinationSnapshot;
+  let moved = 0;
+  for (const key of [...selected]) {
+    const separator = key.indexOf(":");
+    const sourceKey = key.slice(0, separator);
+    const movementId = key.slice(separator + 1);
+    if (moveSnapshotMovement(originSnapshot, destinationSnapshot, sourceKey, movementId)) moved++;
+  }
+  selected.clear();
+  state.accountTransfer.selectedCurrent.clear();
+  state.accountTransfer.selectedDestination.clear();
+  renderAccountTransferDialog();
+  if (moved) showToast("Movimientos preparados", `${moved} movimiento(s) se moverán al guardar ambas cuentas.`, "success");
+}
+
+async function commitAccountTransfer(openDestination) {
+  const currentSnapshot = state.accountTransfer.currentSnapshot;
+  const destinationSnapshot = state.accountTransfer.destinationSnapshot;
+  if (!currentSnapshot || !destinationSnapshot) return;
+  currentSnapshot.workspace.name = snapshotWorkspaceName(currentSnapshot);
+  destinationSnapshot.workspace.name = snapshotWorkspaceName(destinationSnapshot);
+  currentSnapshot.exportFileName ||= currentSnapshot.workspace.name;
+  destinationSnapshot.exportFileName ||= destinationSnapshot.workspace.name;
+  const targetSnapshot = openDestination ? destinationSnapshot : currentSnapshot;
+  const otherSnapshot = openDestination ? currentSnapshot : destinationSnapshot;
+  try {
+    await persistSnapshot(otherSnapshot, workspaceStorageKey(otherSnapshot.workspace.id));
+    await persistSnapshot(targetSnapshot, workspaceStorageKey(targetSnapshot.workspace.id));
+    await persistSnapshot(targetSnapshot);
+    dom.accountTransferDialog.close();
+    restoreStateSnapshot(targetSnapshot);
+    showToast(openDestination ? "Cuenta destino abierta" : "Cuentas actualizadas", openDestination ? `${snapshotWorkspaceName(targetSnapshot)} quedó como conciliación activa.` : "Los movimientos fueron guardados en ambas conciliaciones.", "success", 7000);
+  } catch (error) {
+    console.error(error);
+    showToast("No se pudieron guardar las cuentas", error.message || "El navegador no permitió completar el guardado.", "error", 8000);
+  }
+}
+
+function saveAccountTransfers() {
+  commitAccountTransfer(false);
+}
+
+function openDestinationAccount() {
+  commitAccountTransfer(true);
 }
 
 function openRetryDialog() {
@@ -2180,12 +2595,16 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     const descriptionSimilarity = config.considerDescription ? groupSimilarity(systemMovements, bankMovements) : 1;
     const refsScore = referencePoints(systemMovements.map(item => item.description), bankMovements.map(item => item.description));
     const totalMembers = systemMovements.length + bankMovements.length;
+    const systemSigns = new Set(systemMovements.map(item => Math.sign(item.comparisonAmount)).filter(Boolean));
+    const bankSigns = new Set(bankMovements.map(item => Math.sign(item.comparisonAmount)).filter(Boolean));
+    const mixedGroupSigns = type !== "one-to-one" && (systemSigns.size > 1 || bankSigns.size > 1);
     const protectedGroupDescription = type !== "one-to-one" && config.considerDescription && descriptionSimilarity >= .82;
     const descriptionScore = 30 * (protectedGroupDescription ? 1 : descriptionSimilarity);
     let penalty = 0;
     if (type !== "one-to-one" && !protectedGroupDescription) penalty += Math.min(12, Math.log2(Math.max(1, totalMembers - 2)) * 2);
     if (!protectedGroupDescription && (systemMovements.some(item => genericDescription(item.description)) || bankMovements.some(item => genericDescription(item.description)))) penalty += 3;
     if (!ignoreDates && maximumDateDifference > 0) penalty += Math.min(5, maximumDateDifference);
+    if (mixedGroupSigns) penalty += 18;
     let score = Math.round(clampValue(amountScore + dateScore + descriptionScore + refsScore - penalty, 0, 100));
     const exactAmountAndDate = Math.abs(difference) <= .005 && maximumDateDifference === 0;
     const exactAmountCompatibleDate = Math.abs(difference) <= .005 && dateWithinTolerance;
@@ -2199,6 +2618,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     ];
     if (refsScore) reasons.push("Se encontraron referencias numéricas coincidentes");
     if (type !== "one-to-one") reasons.push(`La suma de ${type === "one-to-many" ? bankMovements.length : systemMovements.length} movimientos coincide con el otro lado`);
+    if (mixedGroupSigns) reasons.push("La agrupación mezcla Débitos y Créditos; requiere revisión manual aunque el neto coincida");
     if (protectedGroupDescription) reasons.push("La descripción comercial coincide; no se aplicó penalización por cantidad de movimientos");
     if (exactAmountAndDate && descriptionSimilarity < .82) reasons.push("Monto y fecha exactos tuvieron prioridad sobre la diferencia de descripción");
     return {
@@ -2217,6 +2637,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
       descriptionSimilarity,
       referenceScore: refsScore,
       protectedGroupDescription,
+      mixedGroupSigns,
       exactAmountAndDate,
       score,
       exact,
@@ -2325,6 +2746,120 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     });
   }
 
+  function oneToOneQuality(candidate) {
+    return candidate.score * 1000
+      + Math.round((candidate.descriptionSimilarity || 0) * 20000)
+      + Number(candidate.referenceScore || 0) * 250
+      + (candidate.exactAmountAndDate ? 3000 : 0)
+      - Number(candidate.dateDifference || 0) * 500;
+  }
+
+  function selectOneToOneGlobally(candidates) {
+    const byNode = new Map();
+    const addNodeEdge = (node, candidate) => {
+      if (!byNode.has(node)) byNode.set(node, []);
+      byNode.get(node).push(candidate);
+    };
+    candidates.forEach(candidate => {
+      addNodeEdge(`s:${candidate.systemIds[0]}`, candidate);
+      addNodeEdge(`b:${candidate.bankIds[0]}`, candidate);
+    });
+    const visitedNodes = new Set();
+    const selected = [];
+    for (const startNode of byNode.keys()) {
+      if (visitedNodes.has(startNode)) continue;
+      const queue = [startNode];
+      const componentCandidates = new Set();
+      const systemIds = new Set();
+      const bankIds = new Set();
+      while (queue.length) {
+        const node = queue.pop();
+        if (visitedNodes.has(node)) continue;
+        visitedNodes.add(node);
+        if (node.startsWith("s:")) systemIds.add(node.slice(2));
+        else bankIds.add(node.slice(2));
+        for (const candidate of byNode.get(node) || []) {
+          componentCandidates.add(candidate);
+          const systemNode = `s:${candidate.systemIds[0]}`;
+          const bankNode = `b:${candidate.bankIds[0]}`;
+          if (!visitedNodes.has(systemNode)) queue.push(systemNode);
+          if (!visitedNodes.has(bankNode)) queue.push(bankNode);
+        }
+      }
+      const edges = [...componentCandidates];
+      const leftIsSystem = systemIds.size <= bankIds.size;
+      const leftIds = [...(leftIsSystem ? systemIds : bankIds)];
+      const rightIds = [...(leftIsSystem ? bankIds : systemIds)];
+      if (leftIds.length <= 12 && rightIds.length <= 18 && edges.length <= 90) {
+        const rightIndex = new Map(rightIds.map((id, index) => [id, index]));
+        const edgesByLeft = new Map(leftIds.map(id => [id, []]));
+        edges.forEach(candidate => {
+          const leftId = leftIsSystem ? candidate.systemIds[0] : candidate.bankIds[0];
+          const rightId = leftIsSystem ? candidate.bankIds[0] : candidate.systemIds[0];
+          if (rightIndex.has(rightId)) edgesByLeft.get(leftId)?.push({ candidate, rightIndex: rightIndex.get(rightId) });
+        });
+        const memo = new Map();
+        const solve = (leftIndex, usedMask) => {
+          if (leftIndex >= leftIds.length) return { value: 0, chosen: [] };
+          const key = `${leftIndex}|${usedMask}`;
+          if (memo.has(key)) return memo.get(key);
+          let best = solve(leftIndex + 1, usedMask);
+          for (const edge of edgesByLeft.get(leftIds[leftIndex]) || []) {
+            const bit = 1 << edge.rightIndex;
+            if (usedMask & bit) continue;
+            const tail = solve(leftIndex + 1, usedMask | bit);
+            const value = 1000000 + oneToOneQuality(edge.candidate) + tail.value;
+            if (value > best.value) best = { value, chosen: [edge.candidate, ...tail.chosen] };
+          }
+          memo.set(key, best);
+          return best;
+        };
+        selected.push(...solve(0, 0).chosen);
+      } else {
+        const usedSystem = new Set();
+        const usedBank = new Set();
+        edges.sort((a, b) => oneToOneQuality(b) - oneToOneQuality(a));
+        for (const candidate of edges) {
+          const systemId = candidate.systemIds[0];
+          const bankId = candidate.bankIds[0];
+          if (usedSystem.has(systemId) || usedBank.has(bankId)) continue;
+          usedSystem.add(systemId);
+          usedBank.add(bankId);
+          selected.push(candidate);
+        }
+      }
+    }
+    return selected;
+  }
+
+  function applySelectedOneToOneAmbiguity(selected, allCandidates) {
+    const bySystem = new Map();
+    const byBank = new Map();
+    allCandidates.forEach(candidate => {
+      const systemId = candidate.systemIds[0];
+      const bankId = candidate.bankIds[0];
+      if (!bySystem.has(systemId)) bySystem.set(systemId, []);
+      if (!byBank.has(bankId)) byBank.set(bankId, []);
+      bySystem.get(systemId).push(candidate);
+      byBank.get(bankId).push(candidate);
+    });
+    selected.forEach(candidate => {
+      const quality = oneToOneQuality(candidate);
+      const alternatives = new Set([
+        ...(bySystem.get(candidate.systemIds[0]) || []),
+        ...(byBank.get(candidate.bankIds[0]) || [])
+      ].filter(item => item !== candidate && oneToOneQuality(item) >= quality - 1800));
+      candidate.ambiguous = alternatives.size > 0;
+      candidate.alternativeCount = alternatives.size;
+      if (candidate.ambiguous) {
+        candidate.score = Math.max(0, candidate.score - Math.min(12, 4 + alternatives.size * 2));
+        candidate.reasons.push(`${alternatives.size} alternativa(s) globales con calidad similar`);
+      } else if (allCandidates.length > selected.length) {
+        candidate.reasons.push("Se eligió dentro de la asignación global que mejor combina fecha, descripción e importe");
+      }
+    });
+  }
+
   async function checkpoint(percent, message, detail, force = false) {
     if (!force && (metrics.candidatePairs + metrics.evaluatedCombinations) % 2048 !== 0) return false;
     emitProgress({ percent, message, detail });
@@ -2414,32 +2949,12 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
         await pause();
       }
     }
-    const bySystem = new Map();
-    const byBank = new Map();
-    candidates.forEach(candidate => {
-      const systemId = candidate.systemIds[0];
-      const bankId = candidate.bankIds[0];
-      if (!bySystem.has(systemId)) bySystem.set(systemId, []);
-      if (!byBank.has(bankId)) byBank.set(bankId, []);
-      bySystem.get(systemId).push(candidate);
-      byBank.get(bankId).push(candidate);
-    });
-    candidates.forEach(candidate => {
-      const alternatives = [
-        ...(bySystem.get(candidate.systemIds[0]) || []).filter(item => item !== candidate && item.score >= candidate.score - 5),
-        ...(byBank.get(candidate.bankIds[0]) || []).filter(item => item !== candidate && item.score >= candidate.score - 5)
-      ];
-      candidate.ambiguous = alternatives.length > 0;
-      candidate.alternativeCount = alternatives.length;
-      if (candidate.ambiguous) {
-        candidate.score = Math.max(0, candidate.score - Math.min(15, 6 + alternatives.length * 2));
-        candidate.reasons.push(`${alternatives.length} alternativa(s) con puntuación similar`);
-      }
-    });
-    candidates.sort((a, b) => Number(b.exact) - Number(a.exact) || b.score - a.score || a.dateDifference - b.dateDifference);
-    for (const candidate of candidates) {
+    const globallySelected = selectOneToOneGlobally(candidates);
+    applySelectedOneToOneAmbiguity(globallySelected, candidates);
+    globallySelected.sort((a, b) => oneToOneQuality(b) - oneToOneQuality(a));
+    for (const candidate of globallySelected) {
       if (reserved.system.has(candidate.systemIds[0]) || reserved.bank.has(candidate.bankIds[0]) || candidate.score < config.possibleThreshold) continue;
-      candidate.status = candidate.score >= config.autoThreshold && !candidate.ambiguous ? "confirmed" : "possible";
+      candidate.status = candidate.score >= config.autoThreshold && !candidate.ambiguous && !candidate.mixedGroupSigns ? "confirmed" : "possible";
       if (addReconciliation(candidate)) reserve(candidate, reserved);
     }
   }
@@ -2562,7 +3077,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     eligibleCandidates.sort((a, b) => b.score - a.score || a.totalMembers - b.totalMembers || a.dateDifference - b.dateDifference);
     for (const candidate of eligibleCandidates) {
       if (candidate.systemIds.some(id => reserved.system.has(id)) || candidate.bankIds.some(id => reserved.bank.has(id)) || candidate.score < config.possibleThreshold) continue;
-      candidate.status = candidate.score >= config.autoThreshold && !candidate.ambiguous ? "confirmed" : "possible";
+      candidate.status = candidate.score >= config.autoThreshold && !candidate.ambiguous && !candidate.mixedGroupSigns ? "confirmed" : "possible";
       if (addReconciliation(candidate)) reserve(candidate, reserved);
     }
     return false;
@@ -2587,6 +3102,29 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     return tokens.slice(0, 2).join("|");
   }
 
+  function internalOffsetEvidence(movements) {
+    const reversalWords = ["devolucion", "reversa", "reversion", "anulacion", "anulado", "retorno", "estorno", "contrapartida"];
+    const normalized = movements.map(item => normalizeText(item.description));
+    const hasReversalWord = normalized.some(description => reversalWords.some(word => description.includes(word)));
+    let sharedReference = false;
+    let relatedOppositeSigns = false;
+    for (let left = 0; left < movements.length; left++) {
+      for (let right = left + 1; right < movements.length; right++) {
+        if (Math.sign(movements[left].comparisonAmount) === Math.sign(movements[right].comparisonAmount)) continue;
+        if (referencePoints([movements[left].description], [movements[right].description])) sharedReference = true;
+        const leftKey = internalBusinessKey(movements[left].description);
+        const rightKey = internalBusinessKey(movements[right].description);
+        if ((leftKey && leftKey === rightKey) || similarity(movements[left].description, movements[right].description) >= .62) relatedOppositeSigns = true;
+      }
+    }
+    return {
+      strong: sharedReference || (hasReversalWord && relatedOppositeSigns),
+      sharedReference,
+      hasReversalWord,
+      relatedOppositeSigns
+    };
+  }
+
   function calculateInternal(movements, sourceKey, criterion) {
     const net = round(movements.reduce((sum, movement) => sum + movement.comparisonAmount, 0));
     let reference = 0;
@@ -2602,6 +3140,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     const dateDifference = Number.isFinite(minimumDay) ? maximumDay - minimumDay : 0;
     const dateWithinTolerance = dateDifference <= config.dateTolerance;
     const descriptionSimilarity = config.considerDescription ? internalDescriptionSimilarity(movements) : 1;
+    const evidence = internalOffsetEvidence(movements);
     let refsScore = 0;
     for (let index = 0; index < movements.length && !refsScore; index++) {
       for (let other = index + 1; other < movements.length && !refsScore; other++) {
@@ -2611,8 +3150,10 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     const amountScore = amountWithinTolerance ? (Math.abs(net) <= .005 ? 45 : 40) : 0;
     const dateScore = dateWithinTolerance ? (dateDifference === 0 ? 25 : 25 * Math.max(.35, 1 - dateDifference / (config.dateTolerance + 1))) : 0;
     const penalty = Math.min(12, Math.log2(Math.max(1, movements.length - 1)) * 2)
-      + (movements.some(item => genericDescription(item.description)) ? 3 : 0);
-    const score = Math.round(clampValue(amountScore + dateScore + 20 * descriptionSimilarity + refsScore - penalty, 0, 100));
+      + (movements.some(item => genericDescription(item.description)) ? 3 : 0)
+      + (evidence.strong ? 0 : 15);
+    let score = Math.round(clampValue(amountScore + dateScore + 20 * descriptionSimilarity + refsScore - penalty, 0, 100));
+    if (!evidence.strong) score = Math.min(score, Math.max(config.possibleThreshold, config.autoThreshold - 1));
     const label = sourceKey === "system" ? "sistema contable" : "caja o banco";
     const reasons = [
       Math.abs(net) <= .005 ? "Los Débitos y Créditos seleccionados dejan un neto de cero" : `El neto (${formatAmount(net)}) está dentro de la tolerancia`,
@@ -2621,6 +3162,8 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
       `La compensación ocurre dentro de ${label}; no necesita un movimiento del otro lado`
     ];
     if (refsScore) reasons.push("Se encontraron referencias numéricas coincidentes");
+    if (evidence.strong) reasons.push("La reversa tiene evidencia semántica o referencias compartidas");
+    else reasons.push("No hay evidencia suficiente de reversa o anulación; no se aprobará automáticamente");
     return {
       id: null,
       type: sourceKey === "system" ? "internal-system" : "internal-bank",
@@ -2635,8 +3178,9 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
       dateWithinTolerance,
       dateDifference,
       descriptionSimilarity,
+      internalAutoEligible: evidence.strong,
       score,
-      exact: Math.abs(net) <= .005 && dateWithinTolerance && (!config.considerDescription || descriptionSimilarity >= .7),
+      exact: Math.abs(net) <= .005 && dateWithinTolerance && evidence.strong && (!config.considerDescription || descriptionSimilarity >= .7),
       ambiguous: false,
       alternativeCount: 0,
       totalMembers: movements.length,
@@ -2714,7 +3258,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
     for (const candidate of pairCandidates) {
       const ids = sourceKey === "system" ? candidate.systemIds : candidate.bankIds;
       if (ids.some(id => reservedSet.has(id)) || candidate.score < config.possibleThreshold) continue;
-      candidate.status = candidate.score >= config.autoThreshold && !candidate.ambiguous ? "confirmed" : "possible";
+      candidate.status = candidate.score >= config.autoThreshold && !candidate.ambiguous && candidate.internalAutoEligible ? "confirmed" : "possible";
       if (addReconciliation(candidate)) ids.forEach(id => reservedSet.add(id));
     }
 
@@ -2736,7 +3280,7 @@ async function reconciliationEngine(payload, emitProgress = () => {}, shouldCanc
       if (!candidate.amountWithinTolerance || !candidate.dateWithinTolerance || candidate.score < config.possibleThreshold) continue;
       candidate.bulk = true;
       candidate.reasons.push("Se comprobó el conjunto completo sin enumerar subcombinaciones");
-      candidate.status = candidate.score >= config.autoThreshold ? "confirmed" : "possible";
+      candidate.status = candidate.score >= config.autoThreshold && candidate.internalAutoEligible ? "confirmed" : "possible";
       if (addReconciliation(candidate)) members.forEach(item => reservedSet.add(item.id));
     }
     emitProgress({ percent: progressEnd, message: "Compensaciones internas comprobadas…", detail: `${sourceKey === "system" ? "Sistema" : "Caja/banco"}: ${remaining.length.toLocaleString("es-UY")} movimientos inspeccionados` });
@@ -3143,6 +3687,21 @@ function calculateSummary() {
   const pendingSystemAmount = pendingSystem.reduce((sum, item) => sum + comparisonAmount(item), 0);
   const pendingBankAmount = pendingBank.reduce((sum, item) => sum + comparisonAmount(item), 0);
   const pendingDifference = roundMoney(pendingSystemAmount - pendingBankAmount);
+  const pendingAbsoluteAmount = roundMoney([...pendingSystem, ...pendingBank].reduce((sum, item) => sum + Math.abs(comparisonAmount(item)), 0));
+  const excludedIds = {
+    system: new Set(excludedSystem.map(item => item.id)),
+    bank: new Set(excludedBank.map(item => item.id))
+  };
+  const activeAbsoluteAmount = roundMoney(
+    state.sources.system.movements.filter(item => !excludedIds.system.has(item.id)).reduce((sum, item) => sum + Math.abs(comparisonAmount(item)), 0)
+    + state.sources.bank.movements.filter(item => !excludedIds.bank.has(item.id)).reduce((sum, item) => sum + Math.abs(comparisonAmount(item)), 0)
+  );
+  const confirmedAbsoluteAmount = roundMoney(
+    state.sources.system.movements.filter(item => confirmedIds.system.has(item.id)).reduce((sum, item) => sum + Math.abs(comparisonAmount(item)), 0)
+    + state.sources.bank.movements.filter(item => confirmedIds.bank.has(item.id)).reduce((sum, item) => sum + Math.abs(comparisonAmount(item)), 0)
+  );
+  const incomingTransfers = (state.transferLog || []).filter(item => item.direction === "in");
+  const outgoingTransfers = (state.transferLog || []).filter(item => item.direction === "out");
   return {
     total,
     totalSystem,
@@ -3157,7 +3716,14 @@ function calculateSummary() {
     excludedCount: excludedSystem.length + excludedBank.length,
     reconciledAmount: roundMoney(reconciledAmount),
     pendingDifference,
+    pendingAbsoluteAmount,
+    activeAbsoluteAmount,
+    confirmedAbsoluteAmount,
     percentage: total ? confirmedCount / total * 100 : 0,
+    amountPercentage: activeAbsoluteAmount ? confirmedAbsoluteAmount / activeAbsoluteAmount * 100 : 0,
+    incomingTransfers,
+    outgoingTransfers,
+    transferCount: incomingTransfers.length + outgoingTransfers.length,
     confirmedReconciliations: confirmedReconciliations.length,
     possibleReconciliations: state.results.reconciliations.filter(item => item.status === "possible").length
   };
@@ -3247,8 +3813,10 @@ function renderReview() {
     ["Pendientes", summary.pendingCount.toLocaleString("es-UY"), "danger"],
     ["Excluidos", summary.excludedCount.toLocaleString("es-UY"), summary.excludedCount ? "warning" : ""],
     ["Importe conciliado", formatMoney(summary.reconciledAmount), "success"],
-    ["Diferencia pendiente", formatMoney(summary.pendingDifference), summary.pendingDifference ? "danger" : "success"],
-    ["Avance", `${formatDecimal(summary.percentage, 1)}%`, "success"]
+    ["Pendiente absoluto", formatMoney(summary.pendingAbsoluteAmount), summary.pendingAbsoluteAmount ? "danger" : "success"],
+    ["Diferencia neta", formatMoney(summary.pendingDifference), summary.pendingDifference ? "danger" : "success"],
+    ["Avance por filas", `${formatDecimal(summary.percentage, 1)}%`, "success"],
+    ["Avance por importe", `${formatDecimal(summary.amountPercentage, 1)}%`, "success"]
   ];
   dom.summaryCards.innerHTML = cards.map(([label, value, type]) => `<div class="summary-card ${type}"><span title="${escapeAttribute(label)}">${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
   document.querySelectorAll("[data-review-tab]").forEach(button => button.classList.toggle("active", button.dataset.reviewTab === state.review.tab));
@@ -3411,7 +3979,7 @@ function renderPendingSide(sourceKey, allItems) {
   const label = sourceKey === "system" ? (state.sources.system.name || "Sistema contable") : (state.sources.bank.name || "Caja o banco");
   const selection = sourceKey === "system" ? state.review.selectedSystem : state.review.selectedBank;
   const selectedMovements = movementsFromIds(sourceKey, selection);
-  return `<section class="pending-side"><div class="pending-side-heading"><h3>${escapeHtml(label)} <span>${allItems.length} visibles</span></h3><div><button class="table-action" data-select-filtered="${sourceKey}" type="button"><i data-lucide="list-checks"></i> Seleccionar filtrados</button><button class="table-action" data-clear-selection="${sourceKey}" type="button">Limpiar lado</button></div></div><div class="table-scroll pending-scroll"><table class="data-table pending-table"><colgroup><col class="pending-col-check"><col class="pending-col-row"><col class="pending-col-date"><col class="pending-col-description"><col class="pending-col-type"><col class="pending-col-amount"></colgroup><thead><tr><th></th><th>Fila</th><th>Fecha</th><th>Descripción</th><th>Tipo</th><th class="amount">Monto</th></tr></thead><tbody>${allItems.length ? allItems.map(item => `<tr data-pending-row data-source="${sourceKey}" data-id="${item.id}" tabindex="0" aria-selected="${selection.has(item.id)}" class="${selection.has(item.id) ? "selected" : ""}"><td><input type="checkbox" data-pending-select data-source="${sourceKey}" value="${item.id}" ${selection.has(item.id) ? "checked" : ""} aria-label="Seleccionar fila ${item.row}"></td><td>${item.row}</td><td>${formatDate(item.date)}</td><td class="pending-description" title="${escapeAttribute(item.description)}">${escapeHtml(item.description)}</td><td><span class="type-badge">${movementTypeLabel(item.type)}</span></td><td class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</td></tr>`).join("") : `<tr><td colspan="6"><div class="empty-state"><div><p>No hay movimientos para los filtros actuales.</p></div></div></td></tr>`}</tbody></table></div><div class="pending-total pending-selected-total" id="pendingTotals-${sourceKey}">${renderSelectedMovementTotals(selectedMovements)}</div></section>`;
+  return `<section class="pending-side"><div class="pending-side-heading"><h3>${escapeHtml(label)} <span>${allItems.length} visibles</span></h3><div><button class="table-action" data-select-filtered="${sourceKey}" type="button"><i data-lucide="list-checks"></i> Seleccionar filtrados</button><button class="table-action" data-clear-selection="${sourceKey}" type="button">Limpiar lado</button></div></div><div class="table-scroll pending-scroll"><table class="data-table pending-table"><colgroup><col class="pending-col-check"><col class="pending-col-row"><col class="pending-col-date"><col class="pending-col-description"><col class="pending-col-type"><col class="pending-col-amount"></colgroup><thead><tr><th></th><th>Fila</th><th>Fecha</th><th>Descripción</th><th>Tipo</th><th class="amount">Monto</th></tr></thead><tbody>${allItems.length ? allItems.map(item => `<tr data-pending-row data-source="${sourceKey}" data-id="${item.id}" tabindex="0" aria-selected="${selection.has(item.id)}" class="${selection.has(item.id) ? "selected" : ""}"><td><input type="checkbox" data-pending-select data-source="${sourceKey}" value="${item.id}" ${selection.has(item.id) ? "checked" : ""} aria-label="Seleccionar fila ${item.row}"></td><td>${item.row}</td><td>${formatDate(item.date)}</td><td class="pending-description">${renderPendingDescription(item)}</td><td><span class="type-badge">${movementTypeLabel(item.type)}</span></td><td class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</td></tr>`).join("") : `<tr><td colspan="6"><div class="empty-state"><div><p>No hay movimientos para los filtros actuales.</p></div></div></td></tr>`}</tbody></table></div><div class="pending-total pending-selected-total" id="pendingTotals-${sourceKey}">${renderSelectedMovementTotals(selectedMovements)}</div></section>`;
 }
 
 function renderSelectedMovementTotals(movements) {
@@ -3624,7 +4192,7 @@ function renderEditSide(sourceKey) {
   const selected = sourceKey === "system" ? state.review.editSelectedSystem : state.review.editSelectedBank;
   const selectedMovements = movementsFromIds(sourceKey, selected);
   const search = sourceKey === "system" ? state.review.editSearchSystem : state.review.editSearchBank;
-  return `<section class="pending-side edit-pending-side"><h3>${label}<span>${movements.length} visibles</span></h3><div class="edit-side-tools"><label class="search-field"><i data-lucide="search"></i><input data-edit-search="${sourceKey}" type="search" value="${escapeAttribute(search)}" placeholder="Filtrar este lado"></label><div><button class="table-action" data-edit-select-filtered="${sourceKey}" type="button"><i data-lucide="list-checks"></i> Seleccionar filtrados</button><button class="table-action" data-edit-clear="${sourceKey}" type="button">Limpiar</button></div></div><div class="table-scroll" data-edit-scroll="${sourceKey}"><table class="data-table pending-table"><colgroup><col class="pending-col-check"><col class="pending-col-row"><col class="pending-col-date"><col class="pending-col-description"><col class="pending-col-type"><col class="pending-col-amount"></colgroup><thead><tr><th></th><th>Fila</th><th>Fecha</th><th>Descripción</th><th>Tipo</th><th class="amount">Monto</th></tr></thead><tbody>${movements.length ? movements.map(item => `<tr data-group-row tabindex="0" aria-selected="${selected.has(item.id)}" class="${selected.has(item.id) ? "selected" : ""}"><td><input data-group-select data-source="${sourceKey}" type="checkbox" value="${item.id}" ${selected.has(item.id) ? "checked" : ""}></td><td>${item.row}</td><td>${formatDate(item.date)}</td><td class="pending-description" title="${escapeAttribute(item.description)}">${escapeHtml(item.description)}</td><td><span class="type-badge">${movementTypeLabel(item.type)}</span></td><td class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</td></tr>`).join("") : `<tr><td colspan="6">No hay movimientos para este filtro.</td></tr>`}</tbody></table></div><div class="pending-total pending-selected-total edit-selected-total" id="editSideTotals-${sourceKey}">${renderSelectedMovementTotals(selectedMovements)}</div></section>`;
+  return `<section class="pending-side edit-pending-side"><h3>${label}<span>${movements.length} visibles</span></h3><div class="edit-side-tools"><label class="search-field"><i data-lucide="search"></i><input data-edit-search="${sourceKey}" type="search" value="${escapeAttribute(search)}" placeholder="Filtrar este lado"></label><div><button class="table-action" data-edit-select-filtered="${sourceKey}" type="button"><i data-lucide="list-checks"></i> Seleccionar filtrados</button><button class="table-action" data-edit-clear="${sourceKey}" type="button">Limpiar</button></div></div><div class="table-scroll" data-edit-scroll="${sourceKey}"><table class="data-table pending-table"><colgroup><col class="pending-col-check"><col class="pending-col-row"><col class="pending-col-date"><col class="pending-col-description"><col class="pending-col-type"><col class="pending-col-amount"></colgroup><thead><tr><th></th><th>Fila</th><th>Fecha</th><th>Descripción</th><th>Tipo</th><th class="amount">Monto</th></tr></thead><tbody>${movements.length ? movements.map(item => `<tr data-group-row tabindex="0" aria-selected="${selected.has(item.id)}" class="${selected.has(item.id) ? "selected" : ""}"><td><input data-group-select data-source="${sourceKey}" type="checkbox" value="${item.id}" ${selected.has(item.id) ? "checked" : ""}></td><td>${item.row}</td><td>${formatDate(item.date)}</td><td class="pending-description">${renderPendingDescription(item)}</td><td><span class="type-badge">${movementTypeLabel(item.type)}</span></td><td class="amount ${item.amount < 0 ? "negative" : ""}">${formatMoney(item.amount)}</td></tr>`).join("") : `<tr><td colspan="6">No hay movimientos para este filtro.</td></tr>`}</tbody></table></div><div class="pending-total pending-selected-total edit-selected-total" id="editSideTotals-${sourceKey}">${renderSelectedMovementTotals(selectedMovements)}</div></section>`;
 }
 
 function updateEditGroupTotals() {
@@ -3789,7 +4357,14 @@ function reconciliationSearchText(item) {
 }
 
 function movementSearchText(item) {
-  return [item.id, item.row, item.dateKey, formatDate(item.date), item.description, item.amount, item.type].join(" ").toLowerCase();
+  return [item.id, item.row, item.dateKey, formatDate(item.date), item.description, item.amount, item.type, item.transferOriginAccount].join(" ").toLowerCase();
+}
+
+function renderPendingDescription(item) {
+  const origin = item.transferOriginAccount
+    ? `<small class="movement-origin-badge"><i data-lucide="arrow-left-right"></i> Movido desde ${escapeHtml(item.transferOriginAccount)}</small>`
+    : "";
+  return `<span title="${escapeAttribute(item.description)}">${escapeHtml(item.description)}</span>${origin}`;
 }
 
 function summarizeMovements(movements) {
@@ -3839,7 +4414,11 @@ function createStateSnapshot() {
     creditAmount: movementDebitCredit(movement).credit,
     originalAmount: movement.originalAmount,
     type: movement.type,
-    status: movement.status
+    status: movement.status,
+    rawValues: Array.isArray(movement.rawValues) ? movement.rawValues : [],
+    transferOriginId: movement.transferOriginId || "",
+    transferOriginAccount: movement.transferOriginAccount || "",
+    transferHistory: Array.isArray(movement.transferHistory) ? movement.transferHistory : []
   });
   const serializeSource = source => ({
     key: source.key,
@@ -3889,6 +4468,11 @@ function createStateSnapshot() {
     schemaVersion: STATE_SCHEMA_VERSION,
     appBuild: APP_BUILD,
     savedAt: new Date().toISOString(),
+    workspace: {
+      id: state.workspace?.id || createWorkspaceState().id,
+      name: getCurrentWorkspaceName()
+    },
+    transferLog: (state.transferLog || []).map(item => ({ ...item, at: item.at instanceof Date ? item.at.toISOString() : item.at })),
     exportFileName: document.getElementById("exportFileName")?.value.trim() || "",
     config: { ...state.config },
     sources: {
@@ -3935,6 +4519,9 @@ function restoreStateSnapshot(snapshot) {
   terminateProcessingWorker();
   state.processing = { cancelled: false, running: false, worker: null, jobId: null };
   state.config = { ...DEFAULT_CONFIG, ...(snapshot.config || {}) };
+  state.workspace = createWorkspaceState(snapshot.workspace?.id, snapshot.workspace?.name || snapshot.exportFileName || "");
+  state.accountTransfer = createAccountTransferState();
+  state.transferLog = (snapshot.transferLog || []).map(item => ({ ...item, at: reviveStoredDate(item.at) || item.at }));
   const restoreSource = (sourceKey, label) => {
     const saved = snapshot.sources?.[sourceKey] || {};
     const movements = (saved.movements || []).map(item => ({ ...item, date: reviveStoredDate(item.date) }));
@@ -4060,10 +4647,15 @@ async function loadPreviousReconciliationFile(file) {
     updateLocalSaveStatus("Abriendo conciliación…");
     const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: false, dense: false });
     const snapshot = extractStateSnapshotFromWorkbook(workbook);
+    snapshot.workspace ||= {};
+    snapshot.workspace.id ||= `workspace-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    snapshot.workspace.name ||= normalizeExportFileName(file.name).replace(/\.xlsx$/i, "");
     restoreStateSnapshot(snapshot);
     const loadedFileName = normalizeExportFileName(file.name).replace(/\.xlsx$/i, "");
     document.getElementById("exportFileName").value = loadedFileName;
-    await persistSnapshot(createStateSnapshot());
+    const restoredSnapshot = createStateSnapshot();
+    await persistSnapshot(restoredSnapshot);
+    await persistSnapshot(restoredSnapshot, workspaceStorageKey(restoredSnapshot.workspace.id));
     showToast("Conciliación restaurada", "Se recuperaron los conciliados, posibles, pendientes y parámetros guardados.", "success", 7000);
   } catch (error) {
     console.error(error);
@@ -4085,11 +4677,15 @@ function openLocalStateDatabase() {
   });
 }
 
-async function persistSnapshot(snapshot) {
+function workspaceStorageKey(workspaceId) {
+  return `workspace:${String(workspaceId || "").trim()}`;
+}
+
+async function persistSnapshot(snapshot, key = LOCAL_STATE_KEY) {
   const database = await openLocalStateDatabase();
   await new Promise((resolve, reject) => {
     const transaction = database.transaction(LOCAL_STATE_STORE, "readwrite");
-    transaction.objectStore(LOCAL_STATE_STORE).put(snapshot, LOCAL_STATE_KEY);
+    transaction.objectStore(LOCAL_STATE_STORE).put(snapshot, key);
     transaction.oncomplete = resolve;
     transaction.onerror = () => reject(transaction.error || new Error("No se pudo guardar el progreso."));
     transaction.onabort = () => reject(transaction.error || new Error("Se canceló el guardado local."));
@@ -4097,11 +4693,11 @@ async function persistSnapshot(snapshot) {
   database.close();
 }
 
-async function readPersistedSnapshot() {
+async function readPersistedSnapshot(key = LOCAL_STATE_KEY) {
   const database = await openLocalStateDatabase();
   const snapshot = await new Promise((resolve, reject) => {
     const transaction = database.transaction(LOCAL_STATE_STORE, "readonly");
-    const request = transaction.objectStore(LOCAL_STATE_STORE).get(LOCAL_STATE_KEY);
+    const request = transaction.objectStore(LOCAL_STATE_STORE).get(key);
     request.onsuccess = () => resolve(request.result || null);
     request.onerror = () => reject(request.error || new Error("No se pudo leer el progreso local."));
   });
@@ -4119,6 +4715,21 @@ async function clearPersistedState() {
     transaction.onerror = () => reject(transaction.error || new Error("No se pudo borrar el progreso local."));
   });
   database.close();
+}
+
+async function readSavedWorkspaceSnapshots() {
+  const database = await openLocalStateDatabase();
+  const entries = await new Promise((resolve, reject) => {
+    const transaction = database.transaction(LOCAL_STATE_STORE, "readonly");
+    const store = transaction.objectStore(LOCAL_STATE_STORE);
+    const keyRequest = store.getAllKeys();
+    const valueRequest = store.getAll();
+    transaction.oncomplete = () => resolve((keyRequest.result || []).map((key, index) => ({ key, snapshot: valueRequest.result?.[index] })).filter(entry => String(entry.key).startsWith("workspace:") && snapshotHasProgress(entry.snapshot)));
+    transaction.onerror = () => reject(transaction.error || new Error("No se pudieron leer las cuentas guardadas."));
+    transaction.onabort = () => reject(transaction.error || new Error("Se canceló la lectura de cuentas guardadas."));
+  });
+  database.close();
+  return entries;
 }
 
 function scheduleStatePersistence(delay = 650) {
@@ -4141,6 +4752,7 @@ async function persistCurrentState() {
       return;
     }
     await persistSnapshot(snapshot);
+    await persistSnapshot(snapshot, workspaceStorageKey(snapshot.workspace.id));
     state.persistence.lastSavedAt = new Date();
     state.persistence.saveErrorShown = false;
     updateLocalSaveStatus("Progreso guardado localmente");
@@ -4183,9 +4795,13 @@ function renderExportSummary() {
     ["Posibles", summary.possibleReconciliations],
     ["Pendientes", summary.pendingCount],
     ["Excluidos por período", summary.excludedCount],
+    ["Movimientos recibidos", summary.incomingTransfers.length],
+    ["Movimientos enviados", summary.outgoingTransfers.length],
     ["Importe conciliado", formatMoney(summary.reconciledAmount)],
-    ["Diferencia pendiente", formatMoney(summary.pendingDifference)],
-    ["Porcentaje conciliado", `${formatDecimal(summary.percentage, 1)}%`]
+    ["Pendiente absoluto", formatMoney(summary.pendingAbsoluteAmount)],
+    ["Diferencia neta", formatMoney(summary.pendingDifference)],
+    ["Avance por filas", `${formatDecimal(summary.percentage, 1)}%`],
+    ["Avance por importe", `${formatDecimal(summary.amountPercentage, 1)}%`]
   ].map(([label, value]) => `<div class="export-stat"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join("");
   const fileNameInput = document.getElementById("exportFileName");
   if (!fileNameInput.value.trim()) fileNameInput.value = `conciliacion_${toFileTimestamp()}`;
@@ -4220,9 +4836,13 @@ function exportWorkbook() {
       ["Movimientos conciliados", summary.confirmedCount],
       ["Movimientos en posibles conciliaciones", summary.possibleCount],
       ["Movimientos pendientes", summary.pendingCount],
+      ["Movimientos recibidos desde otras cuentas", summary.incomingTransfers.length],
+      ["Movimientos enviados a otras cuentas", summary.outgoingTransfers.length],
       ["Importe conciliado", summary.reconciledAmount],
-      ["Diferencia pendiente", summary.pendingDifference],
-      ["Porcentaje de conciliación", summary.percentage / 100],
+      ["Importe pendiente absoluto", summary.pendingAbsoluteAmount],
+      ["Diferencia pendiente neta", summary.pendingDifference],
+      ["Porcentaje de conciliación por filas", summary.percentage / 100],
+      ["Porcentaje de conciliación por importe", summary.amountPercentage / 100],
       ["", ""],
       ["PARÁMETROS UTILIZADOS", ""],
       ["Tolerancia de fechas (días)", state.config.dateTolerance],
@@ -4268,6 +4888,12 @@ function exportWorkbook() {
     appendSheet(workbook, pendingSystemSheet, "Pendientes del sistema");
     const pendingBankSheet = createStyledDataSheet(pendingHeaders, summary.pendingBank.map(pendingExportRow), { fill: "FBEEEE", numericColumns: [3, 4] });
     appendSheet(workbook, pendingBankSheet, "Pendientes de caja o banco");
+
+    if ((state.transferLog || []).length) {
+      const transferHeaders = ["Dirección", "Fecha y hora", "Cuenta origen", "Cuenta destino", "Origen del movimiento", "Fila original", "Fecha del movimiento", "Descripción", "Débito", "Crédito", "ID original", "ID en destino"];
+      const transferRows = state.transferLog.map(transferExportRow);
+      appendSheet(workbook, createStyledDataSheet(transferHeaders, transferRows, { fill: "EDF5FA", numericColumns: [8, 9] }), "Movimientos transferidos");
+    }
 
     if (summary.excludedCount) {
       const excludedHeaders = ["Origen", ...pendingHeaders, "Motivo", "Período aplicado"];
@@ -4336,6 +4962,30 @@ function reconciliationExportRow(item) {
 function pendingExportRow(item) {
   const amounts = movementDebitCredit(item);
   return [item.row, formatDate(item.date), item.description, amounts.debit, amounts.credit, movementTypeLabel(item.type), item.status];
+}
+
+function transferExportRow(item) {
+  const movement = {
+    amount: Number(item.amount) || 0,
+    debitAmount: Number(item.amount) >= 0 ? Math.abs(Number(item.amount) || 0) : 0,
+    creditAmount: Number(item.amount) < 0 ? Math.abs(Number(item.amount) || 0) : 0,
+    type: Number(item.amount) >= 0 ? "debit" : "credit"
+  };
+  const totals = movementDebitCredit(movement);
+  return [
+    item.direction === "in" ? "Recibido" : "Enviado",
+    formatDateTime(reviveStoredDate(item.at) || new Date()),
+    item.fromAccount || "",
+    item.toAccount || "",
+    item.sourceKey === "system" ? "Sistema contable" : "Caja o banco",
+    item.row || "",
+    item.dateKey ? formatDateInput(item.dateKey) : formatDate(reviveStoredDate(item.date)),
+    item.description || "",
+    totals.debit,
+    totals.credit,
+    item.movementOriginId || "",
+    item.movementDestinationId || ""
+  ];
 }
 
 function excludedPeriodExportRow(sourceLabel, item, periodLabel) {
@@ -4421,7 +5071,7 @@ function styleSummarySheet(worksheet) {
     const labelCell = worksheet[XLSX.utils.encode_cell({ r: row, c: 0 })];
     const valueCell = worksheet[XLSX.utils.encode_cell({ r: row, c: 1 })];
     if (!labelCell) continue;
-    const section = row === 0 || row === 13;
+    const section = row === 0 || row === 19;
     labelCell.s = section
       ? { fill: { fgColor: { rgb: "164E55" } }, font: { bold: true, color: { rgb: "FFFFFF" }, sz: row === 0 ? 14 : 11 }, alignment: { vertical: "center" } }
       : { fill: { fgColor: { rgb: row % 2 ? "F4F7F7" : "FFFFFF" } }, font: { bold: true, color: { rgb: "405153" } }, border: { bottom: { style: "hair", color: { rgb: "DDE3E4" } } } };
@@ -4429,11 +5079,13 @@ function styleSummarySheet(worksheet) {
       ? { fill: { fgColor: { rgb: "164E55" } } }
       : { fill: { fgColor: { rgb: row % 2 ? "F4F7F7" : "FFFFFF" } }, border: { bottom: { style: "hair", color: { rgb: "DDE3E4" } } } };
   }
-  if (worksheet.B10) worksheet.B10.z = "#,##0.00;[Red]-#,##0.00";
-  if (worksheet.B11) worksheet.B11.z = "#,##0.00;[Red]-#,##0.00";
-  if (worksheet.B12) worksheet.B12.z = "0.0%";
-  if (worksheet.B16) worksheet.B16.z = "#,##0.00";
-  if (worksheet.B17) worksheet.B17.z = "0.00%";
+  if (worksheet.B14) worksheet.B14.z = "#,##0.00;[Red]-#,##0.00";
+  if (worksheet.B15) worksheet.B15.z = "#,##0.00;[Red]-#,##0.00";
+  if (worksheet.B16) worksheet.B16.z = "#,##0.00;[Red]-#,##0.00";
+  if (worksheet.B17) worksheet.B17.z = "0.0%";
+  if (worksheet.B18) worksheet.B18.z = "0.0%";
+  if (worksheet.B22) worksheet.B22.z = "#,##0.00";
+  if (worksheet.B23) worksheet.B23.z = "0.00%";
 }
 
 function estimateColumnWidths(worksheet, range) {
@@ -4637,8 +5289,12 @@ window.ReconciliationApp = Object.freeze({
   restoreStateSnapshot,
   createApplicationStateSheet,
   extractStateSnapshotFromWorkbook,
+  normalizeTransferSnapshot,
+  snapshotPendingMovements,
+  moveSnapshotMovement,
   persistSnapshot,
   readPersistedSnapshot,
+  readSavedWorkspaceSnapshots,
   clearPersistedState,
   exportWorkbook,
   getState: () => state

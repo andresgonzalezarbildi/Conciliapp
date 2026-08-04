@@ -7,10 +7,10 @@
   <meta name="description" content="Herramienta local para conciliación de movimientos contables, de caja y banco.">
   <title>Conciliación contable</title>
   <link rel="icon" href="favicon.png" type="image/png">
-  <link rel="stylesheet" href="styles.css?v=20260717-8">
+  <link rel="stylesheet" href="styles.css?v=20260804-1">
   <script defer src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script defer src="app.js?v=20260717-8"></script>
+  <script defer src="app.js?v=20260804-1"></script>
 </head>
 <body>
   <header class="app-header">
@@ -175,13 +175,13 @@
             <label class="check-field full"><input name="searchManyToOne" type="checkbox"><span>Buscar coincidencias varios a uno</span></label>
             <label class="check-field full"><input name="allowMixedGroupSigns" type="checkbox"><span>Permitir compensar Débitos y Créditos dentro de una agrupación</span></label>
             <label class="check-field full"><input name="searchInternalOffsets" type="checkbox"><span>Buscar movimientos que se anulan dentro de la misma tabla</span></label>
-          </div><p class="config-help">Las agrupaciones masivas exactas del mismo día se prueban primero. Si se habilitan las compensaciones, el motor suma los importes con su signo contable: por ejemplo, +150 y −50 pueden conciliar contra +100. También puede detectar un Débito y un Crédito que dejan neto cero dentro de Caja o del Sistema.</p><div id="costWarning" class="inline-warning hidden"><i data-lucide="triangle-alert"></i><span></span></div></fieldset>
+          </div><p class="config-help">Las agrupaciones que mezclan Débitos y Créditos y las compensaciones internas están desactivadas por defecto. Si se habilitan, cualquier grupo con signos mezclados queda en Posibles; una compensación interna sólo se aprueba automáticamente cuando existe una referencia compartida o evidencia clara de reversa, devolución o anulación.</p><div id="costWarning" class="inline-warning hidden"><i data-lucide="triangle-alert"></i><span></span></div></fieldset>
           <fieldset class="config-section"><legend>Confianza</legend><div class="config-grid">
             <label class="field"><span>Conciliación automática <small>0–100</small></span><input name="autoThreshold" type="number" min="0" max="100" step="1"></label>
             <label class="field"><span>Posible conciliación <small>0–100</small></span><input name="possibleThreshold" type="number" min="0" max="100" step="1"></label>
             <label class="check-field full"><input name="considerDescription" type="checkbox"><span>Considerar similitud de descripciones</span></label>
             <label class="check-field full"><input name="excludeReconciled" type="checkbox"><span>Excluir filas ya conciliadas cuando se haya asignado una columna Estado</span></label>
-          </div><p class="config-help">Cuando monto y fecha coinciden exactamente y no existe otra alternativa equivalente, el motor les da prioridad aunque las descripciones sean diferentes. En agrupaciones con un nombre comercial común no se descuenta puntaje por cantidad de movimientos.</p></fieldset>
+          </div><p class="config-help">Cuando hay importes repetidos, el motor evalúa la asignación completa y elige el conjunto que mejor combina descripción, referencias y fecha. Una coincidencia exacta de monto no desplaza por sí sola a una alternativa contablemente más coherente.</p></fieldset>
           <fieldset class="config-section"><legend>Normalización de descripciones</legend><div class="config-grid">
             <label class="check-field"><input name="ignoreCase" type="checkbox"><span>Ignorar mayúsculas</span></label>
             <label class="check-field"><input name="ignoreAccents" type="checkbox"><span>Ignorar tildes</span></label>
@@ -222,6 +222,7 @@
           <label class="field inline"><span>Orden</span><select id="sortResults"><option value="score-desc">Mayor confianza</option><option value="score-asc">Menor confianza</option><option value="date-desc">Fecha más reciente</option><option value="date-asc">Fecha más antigua</option><option value="difference-desc">Mayor diferencia</option></select></label>
           <button id="retryPendingBtn" class="button button-secondary button-small hidden" type="button" title="Configurar una búsqueda adicional sólo sobre los movimientos pendientes"><i data-lucide="scan-search"></i> Búsqueda avanzada</button>
           <button id="trimPeriodBtn" class="button button-secondary button-small hidden" type="button" title="Excluir temporalmente pendientes fuera de un rango de fechas"><i data-lucide="calendar-range"></i> Recortar período</button>
+          <button id="manageAccountsBtn" class="button button-secondary button-small" type="button" title="Mover movimientos pendientes entre conciliaciones"><i data-lucide="arrow-left-right"></i> Mover entre cuentas</button>
           <button id="approveAllPossibleBtn" class="button button-secondary button-small hidden" type="button"><i data-lucide="check-check"></i> Aprobar filtrados</button>
           <button id="rejectAllPossibleBtn" class="button button-danger button-small hidden" type="button"><i data-lucide="x-circle"></i> Rechazar filtrados</button>
         </div>
@@ -239,7 +240,7 @@
             <button id="downloadExcelBtn" class="button button-primary button-large" type="button"><i data-lucide="download"></i> Descargar resultado en Excel</button>
             <p class="local-reminder"><i data-lucide="shield-check"></i> El archivo se genera localmente en este navegador.</p>
           </div>
-          <aside class="sheet-list"><h2>Hojas incluidas</h2><ol><li>Resumen</li><li>Conciliaciones</li><li>Posibles conciliaciones</li><li>Pendientes del sistema</li><li>Pendientes de caja o banco</li><li>Excluidos por período, si existen</li><li>Datos originales del sistema</li><li>Datos originales de caja o banco</li><li>Errores de importación, si existen</li></ol></aside>
+          <aside class="sheet-list"><h2>Hojas incluidas</h2><ol><li>Resumen</li><li>Conciliaciones</li><li>Posibles conciliaciones</li><li>Pendientes del sistema</li><li>Pendientes de caja o banco</li><li>Movimientos transferidos, si existen</li><li>Excluidos por período, si existen</li><li>Datos originales del sistema</li><li>Datos originales de caja o banco</li><li>Errores de importación, si existen</li></ol></aside>
         </div>
         <div class="step-actions"><button class="button button-secondary" data-go-step="6" type="button"><i data-lucide="arrow-left"></i> Volver a revisión</button><button id="finishNewBtn" class="button button-quiet" type="button"><i data-lucide="rotate-ccw"></i> Iniciar otra conciliación</button></div>
       </section>
@@ -297,6 +298,32 @@
   </dialog>
 
   <dialog id="editGroupDialog" class="modal modal-wide"><div class="modal-card"><div class="modal-header"><div><h2 id="editGroupTitle">Revisar propuesta</h2><p id="editGroupSubtitle">Consulte el motivo y ajuste los movimientos si es necesario.</p></div><button class="icon-button" data-close-group type="button" aria-label="Cerrar"><i data-lucide="x"></i></button></div><div id="editGroupReason" class="proposal-review-reason"></div><div id="editGroupContent" class="manual-grid"></div><div id="editGroupTotals" class="group-totals"></div><label class="field edit-group-observation"><span>Observación <small>se incluye en el Excel exportado</small></span><input id="editGroupObservation" type="text" placeholder="Motivo del ajuste o nota para revisión"></label><div class="modal-actions proposal-review-actions"><button class="button button-secondary" data-close-group type="button">Cancelar</button><button id="rejectGroupBtn" class="button button-danger" type="button"><i data-lucide="x"></i> Rechazar</button><button id="saveGroupBtn" class="button button-secondary" type="button"><i data-lucide="save"></i> Guardar propuesta</button><button id="approveGroupBtn" class="button button-primary" type="button"><i data-lucide="check"></i> Guardar y aprobar</button></div></div></dialog>
+
+  <dialog id="accountTransferDialog" class="modal modal-extra-wide">
+    <div class="modal-card account-transfer-card">
+      <div class="modal-header">
+        <div><h2>Mover movimientos entre cuentas</h2><p>Cargue otra conciliación y arrastre movimientos pendientes de una cuenta a la otra. Los movimientos conciliados deben deshacerse antes de poder moverlos.</p></div>
+        <button class="icon-button" data-close-account-transfer type="button" aria-label="Cerrar"><i data-lucide="x"></i></button>
+      </div>
+      <div class="account-transfer-loader">
+        <label class="field"><span>Cuenta guardada</span><select id="savedAccountSelect"><option value="">Seleccione una cuenta local</option></select></label>
+        <button id="loadSavedAccountBtn" class="button button-secondary" type="button"><i data-lucide="folder-open"></i> Abrir guardada</button>
+        <span class="account-loader-separator">o</span>
+        <button id="loadAccountTransferBtn" class="button button-secondary" type="button"><i data-lucide="file-up"></i> Cargar conciliación XLSX</button>
+        <input id="accountTransferInput" type="file" accept=".xlsx" hidden>
+      </div>
+      <div id="accountTransferContent" class="account-transfer-content"></div>
+      <div class="account-transfer-actions">
+        <button id="moveToDestinationBtn" class="button button-secondary" type="button"><i data-lucide="arrow-right"></i> Mover seleccionados a destino</button>
+        <button id="moveToCurrentBtn" class="button button-secondary" type="button"><i data-lucide="arrow-left"></i> Mover seleccionados a actual</button>
+      </div>
+      <div class="modal-actions">
+        <button class="button button-secondary" data-close-account-transfer type="button">Cerrar</button>
+        <button id="saveAccountTransfersBtn" class="button button-secondary" type="button"><i data-lucide="save"></i> Guardar ambas cuentas</button>
+        <button id="openDestinationAccountBtn" class="button button-primary" type="button"><i data-lucide="folder-input"></i> Guardar y abrir destino</button>
+      </div>
+    </div>
+  </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 </body>
