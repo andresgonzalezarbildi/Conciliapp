@@ -40,6 +40,9 @@ const app = context.ReconciliationApp;
 assert(app, 'exports missing');
 assert.equal(app.getState().movementEditor.statusFilter, 'pending', 'movement editor must open with pending movements');
 const editorCss = fs.readFileSync(require('path').join(__dirname, '..', 'styles.css'), 'utf8');
+const indexHtml = fs.readFileSync(require('path').join(__dirname, '..', 'index.html'), 'utf8');
+assert(indexHtml.includes('Estado y movimientos'), 'movement area was not renamed clearly');
+assert(indexHtml.includes('newMovementAccountCurrency'), 'new account currency selector missing');
 assert(/\.movement-editor-card\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;/s.test(editorCss), 'movement editor card must constrain the scrollable content');
 assert(/\.movement-editor-content\s*\{[^}]*overflow-y:\s*scroll;/s.test(editorCss), 'movement editor content must have vertical scrolling');
 
@@ -285,6 +288,44 @@ const mov = (id, source, date, description, amount) => ({ id, source, row: 1, da
   assert.equal(groupedReconciliation.difference, 0);
   assert.equal(groupedSystemAccount.sources.bank.movements[0].type, 'debit');
   assert.equal(groupedSystemAccount.sources.bank.movements[0].amount, 1400);
+
+
+  assert.equal(app.inferWorkspaceCurrency('ITAU USD agosto'), 'USD');
+  assert.equal(app.inferWorkspaceCurrency('Caja pesos agosto'), 'UYU');
+
+  const julySnapshot = app.createEmptyMovementSnapshot('ITAU julio', 'UYU');
+  julySnapshot.workspace.id = 'itau-july';
+  julySnapshot.sources.system.movements.push({ id:'pending-july', source:'system', row:1, date:'2026-07-30T00:00:00.000Z', dateKey:'2026-07-30', description:'Cheque pendiente', amount:1250, debitAmount:1250, creditAmount:0, type:'debit', status:'' });
+  const augustSnapshot = app.createEmptyMovementSnapshot('ITAU agosto', 'UYU');
+  augustSnapshot.workspace.id = 'itau-august';
+  const carryResult = app.carryForwardPendingMovements(julySnapshot, augustSnapshot, [{ sourceKey:'system', movementId:'pending-july' }]);
+  assert.equal(carryResult.copied, 1, 'pending movement was not carried forward');
+  assert.equal(julySnapshot.sources.system.movements.length, 1, 'carry forward removed movement from prior month');
+  assert.equal(augustSnapshot.sources.system.movements.length, 1, 'carry forward did not create destination movement');
+  assert.equal(augustSnapshot.sources.system.movements[0].carryForwardFromAccount, 'ITAU julio');
+  assert.equal(augustSnapshot.sources.system.movements[0].dateKey, '2026-07-30', 'carry forward changed original date');
+  const duplicateCarry = app.carryForwardPendingMovements(julySnapshot, augustSnapshot, [{ sourceKey:'system', movementId:'pending-july' }]);
+  assert.equal(duplicateCarry.copied, 0, 'same pending movement was copied twice');
+  assert.equal(duplicateCarry.skipped, 1, 'duplicate carry was not reported');
+
+  const usdAugust = app.createEmptyMovementSnapshot('ITAU USD agosto', 'USD');
+  assert.throws(() => app.carryForwardPendingMovements(julySnapshot, usdAugust, [{ sourceKey:'system', movementId:'pending-july' }]), /UYU.*USD/, 'cross-currency carry was allowed');
+
+  const manualMovement = app.createMovementInSnapshot(augustSnapshot, {
+    sourceKey:'bank', date:'2026-08-01', description:'Ajuste manual', amount:350.25, type:'credit', status:'partida conciliatoria'
+  });
+  assert.equal(manualMovement.amount, -350.25);
+  assert.equal(manualMovement.creditAmount, 350.25);
+  assert.equal(manualMovement.manuallyAdded, true);
+  assert.equal(augustSnapshot.movementEditLog.at(-1).action, 'create');
+
+  const currencySystem = app.createEmptyMovementSnapshot('Cuenta pesos', 'UYU');
+  currencySystem.workspace.id = 'currency-system';
+  currencySystem.sources.system.movements.push({ id:'same-number-system', source:'system', row:1, date:'2026-08-01T00:00:00.000Z', dateKey:'2026-08-01', description:'Transferencia', amount:100, debitAmount:100, creditAmount:0, type:'debit', status:'' });
+  const currencyBank = app.createEmptyMovementSnapshot('Cuenta dólares', 'USD');
+  currencyBank.workspace.id = 'currency-bank';
+  currencyBank.sources.bank.movements.push({ id:'same-number-bank', source:'bank', row:1, date:'2026-08-01T00:00:00.000Z', dateKey:'2026-08-01', description:'Transferencia', amount:100, debitAmount:100, creditAmount:0, type:'debit', status:'' });
+  assert.equal(app.findCrossAccountCandidates([{ snapshot:currencySystem }, { snapshot:currencyBank }]).length, 0, 'cross-currency candidate was proposed');
 
   console.log('All tests passed');
 })().catch(err => { console.error(err); process.exit(1); });

@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_BUILD = "2026.08.04-4";
+const APP_BUILD = "2026.08.06-1";
 const STATE_SCHEMA_VERSION = 1;
 const STATE_SHEET_NAME = "Estado ConciliApp";
 const STATE_CHUNK_SIZE = 30000;
@@ -90,13 +90,34 @@ const state = {
   movementEditor: createMovementEditorState(),
   transferLog: [],
   movementEditLog: [],
+  movementCarryLog: [],
   persistence: { restoring: false, saveTimer: null, saveErrorShown: false, lastSavedAt: null }
 };
 
-function createWorkspaceState(id = "", name = "") {
+function normalizeWorkspaceCurrency(value, fallbackName = "") {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (["USD", "DOLAR", "DÓLAR", "DOLARES", "DÓLARES", "U$S", "US$"].includes(normalized)) return "USD";
+  if (["UYU", "PESO", "PESOS", "$U"].includes(normalized)) return "UYU";
+  return inferWorkspaceCurrency(fallbackName);
+}
+
+function inferWorkspaceCurrency(name) {
+  const normalized = String(name || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  return /(^|[^a-z])(usd|u\$s|us\$|dolar|dolares)([^a-z]|$)/.test(normalized) ? "USD" : "UYU";
+}
+
+function workspaceCurrency(snapshotOrWorkspace) {
+  const workspace = snapshotOrWorkspace?.workspace || snapshotOrWorkspace || {};
+  const name = snapshotOrWorkspace?.workspace ? snapshotWorkspaceName(snapshotOrWorkspace) : workspace.name;
+  return normalizeWorkspaceCurrency(workspace.currency, name);
+}
+
+function createWorkspaceState(id = "", name = "", currency = "") {
+  const normalizedName = String(name || "").trim();
   return {
     id: id || `workspace-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    name: String(name || "").trim()
+    name: normalizedName,
+    currency: currency ? normalizeWorkspaceCurrency(currency, normalizedName) : ""
   };
 }
 
@@ -126,7 +147,8 @@ function createMovementEditorState() {
     dirty: false,
     modifiedAccountIds: new Set(),
     postSaveAccountId: "",
-    crossCandidates: new Map()
+    crossCandidates: new Map(),
+    selectedMovements: new Set()
   };
 }
 
@@ -1500,6 +1522,7 @@ async function resetApplication() {
   state.movementEditor = createMovementEditorState();
   state.transferLog = [];
   state.movementEditLog = [];
+  state.movementCarryLog = [];
   state.persistence.lastSavedAt = null;
   updateLocalSaveStatus("Sin progreso guardado");
   document.querySelectorAll("[data-source-editor]").forEach(editor => {
@@ -1808,6 +1831,7 @@ function normalizeTransferSnapshot(snapshot, fallbackName = "Conciliación") {
   normalized.workspace ||= {};
   normalized.workspace.id ||= `workspace-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   normalized.workspace.name ||= String(normalized.exportFileName || fallbackName).replace(/\.xlsx$/i, "");
+  normalized.workspace.currency = normalizeWorkspaceCurrency(normalized.workspace.currency, normalized.workspace.name);
   normalized.sources ||= {};
   for (const sourceKey of ["system", "bank"]) {
     normalized.sources[sourceKey] ||= {};
@@ -1817,6 +1841,7 @@ function normalizeTransferSnapshot(snapshot, fallbackName = "Conciliación") {
   normalized.results.reconciliations ||= [];
   normalized.transferLog ||= [];
   normalized.movementEditLog ||= [];
+  normalized.movementCarryLog ||= [];
   normalized.review ||= {};
   normalized.review.periodFilter ||= { from: "", to: "", appliedAt: null };
   return normalized;
@@ -2226,8 +2251,8 @@ function ensureUniqueMovementEditorWorkspace(snapshot) {
   return snapshot;
 }
 
-function createEmptyMovementSnapshot(name) {
-  const workspace = createWorkspaceState("", name);
+function createEmptyMovementSnapshot(name, currency = "UYU") {
+  const workspace = createWorkspaceState("", name, currency);
   const emptySource = (key, label) => ({
     ...createEmptySource(key, label),
     fileName: `${name || label}.xlsx`,
@@ -2246,6 +2271,7 @@ function createEmptyMovementSnapshot(name) {
     workspace,
     transferLog: [],
     movementEditLog: [],
+    movementCarryLog: [],
     exportFileName: name,
     config: { ...DEFAULT_CONFIG },
     sources: { system: emptySource("system", "Sistema contable"), bank: emptySource("bank", "Caja o banco") },
@@ -2259,7 +2285,7 @@ async function openMovementEditor() {
   if (snapshotHasProgress(createStateSnapshot())) {
     const current = normalizeTransferSnapshot(createStateSnapshot(), getCurrentWorkspaceName());
     state.movementEditor.accounts.push({ snapshot: current, origin: "current" });
-    state.movementEditor.selectedAccountId = current.workspace.id;
+    state.movementEditor.selectedAccountId = MOVEMENT_EDITOR_SUMMARY_ID;
   }
   document.getElementById("movementEditorSearch").value = "";
   document.getElementById("movementEditorSourceFilter").value = "all";
@@ -2304,12 +2330,14 @@ function createEmptyMovementEditorAccount() {
   const input = document.getElementById("newMovementAccountName");
   const name = input.value.trim();
   if (!name) return showToast("Indique un nombre", "Escriba el nombre de la nueva cuenta.", "error");
-  const snapshot = createEmptyMovementSnapshot(name);
+  const currency = document.getElementById("newMovementAccountCurrency")?.value || "UYU";
+  const snapshot = createEmptyMovementSnapshot(name, currency);
   state.movementEditor.accounts.push({ snapshot, origin: "new" });
   state.movementEditor.selectedAccountId = snapshot.workspace.id;
   state.movementEditor.page = 1;
   markMovementEditorAccountsModified(snapshot.workspace.id);
   input.value = "";
+  document.getElementById("newMovementAccountCurrency").value = "UYU";
   renderMovementEditor();
 }
 
@@ -2363,6 +2391,7 @@ function movementEditorAccountMetrics(snapshot) {
     pendingCount: system.length + bank.length,
     systemTotals,
     bankTotals,
+    currency: workspaceCurrency(snapshot),
     pendingAbsolute: roundMoney([...system, ...bank].reduce((sum, item) => {
       const amounts = movementDebitCredit(item);
       return sum + amounts.debit + amounts.credit;
@@ -2389,6 +2418,7 @@ function buildCrossAccountEntries(account, sourceKey) {
     return {
       snapshot,
       accountId,
+      currency: workspaceCurrency(snapshot),
       sourceKey,
       movements: [movement],
       total: amount,
@@ -2414,6 +2444,7 @@ function buildCrossAccountEntries(account, sourceKey) {
     entries.push({
       snapshot,
       accountId,
+      currency: workspaceCurrency(snapshot),
       sourceKey,
       movements: group.movements,
       total,
@@ -2445,6 +2476,7 @@ function findCrossAccountCandidates(accounts, options = {}) {
     for (let cents = systemCents - toleranceCents; cents <= systemCents + toleranceCents; cents++) {
       for (const bankEntry of bankIndex.get(cents) || []) {
         if (bankEntry.accountId === systemEntry.accountId) continue;
+        if (bankEntry.currency !== systemEntry.currency) continue;
         if (systemEntry.group && bankEntry.group) continue;
         if (!systemEntry.date || !bankEntry.date) continue;
         const dateDifference = daysBetween(systemEntry.date, bankEntry.date);
@@ -2682,7 +2714,13 @@ function renderMovementEditorSummary() {
   const totalAccounts = accountMetrics.length;
   const totalSystem = accountMetrics.reduce((sum, entry) => sum + entry.metrics.system.length, 0);
   const totalBank = accountMetrics.reduce((sum, entry) => sum + entry.metrics.bank.length, 0);
-  const pendingAbsolute = roundMoney(accountMetrics.reduce((sum, entry) => sum + entry.metrics.pendingAbsolute, 0));
+  const totalsByCurrency = { UYU: { absolute: 0, debit: 0, credit: 0 }, USD: { absolute: 0, debit: 0, credit: 0 } };
+  for (const { metrics } of accountMetrics) {
+    const bucket = totalsByCurrency[metrics.currency] ||= { absolute: 0, debit: 0, credit: 0 };
+    bucket.absolute = roundMoney(bucket.absolute + metrics.pendingAbsolute);
+    bucket.debit = roundMoney(bucket.debit + metrics.systemTotals.debit + metrics.bankTotals.debit);
+    bucket.credit = roundMoney(bucket.credit + metrics.systemTotals.credit + metrics.bankTotals.credit);
+  }
   const query = editor.search;
   const allCandidates = findCrossAccountCandidates(editor.accounts);
   editor.crossCandidates = new Map(allCandidates.map(candidate => [candidate.id, candidate]));
@@ -2693,42 +2731,45 @@ function renderMovementEditorSummary() {
     item.systemMagnitude, item.bankMagnitude
   ].join(" ").toLowerCase().includes(query)) : allCandidates;
   dom.movementEditorContent.innerHTML = `
-    <div class="movement-summary-heading"><div><h3>Resumen de conciliaciones</h3><p>Vista consolidada de pendientes. Los cruces sugeridos comparan movimientos del sistema de una cuenta con movimientos de caja o banco de otra.</p></div><span>${totalAccounts} cuenta(s)</span></div>
-    <div class="movement-summary-cards">
+    <div class="movement-summary-heading"><div><h3>Estado total</h3><p>Vista consolidada de pendientes y cruces entre cuentas. Los importes de pesos y dólares se calculan por separado.</p></div><span>${totalAccounts} cuenta(s)</span></div>
+    <div class="movement-summary-cards movement-summary-cards-currency">
       <article><span>Cuentas cargadas</span><strong>${totalAccounts}</strong></article>
       <article><span>Pendientes del sistema</span><strong>${totalSystem.toLocaleString("es-UY")}</strong></article>
       <article><span>Pendientes de caja/banco</span><strong>${totalBank.toLocaleString("es-UY")}</strong></article>
-      <article><span>Importe pendiente absoluto</span><strong>${formatMoney(pendingAbsolute)}</strong></article>
+      <article><span>Pendiente absoluto · UYU</span><strong>${formatCurrencyAmount(totalsByCurrency.UYU.absolute, "UYU")}</strong></article>
+      <article><span>Pendiente absoluto · USD</span><strong>${formatCurrencyAmount(totalsByCurrency.USD.absolute, "USD")}</strong></article>
     </div>
     <section class="movement-summary-section">
-      <div class="movement-summary-section-heading"><div><h4>Pendientes por cuenta</h4><p>Abra una cuenta para editar sus filas. Por defecto se muestran únicamente las pendientes.</p></div></div>
+      <div class="movement-summary-section-heading"><div><h4>Pendientes por cuenta</h4><p>Abra una cuenta para agregar movimientos, editar filas o arrastrar partidas al mes siguiente.</p></div></div>
       <div class="movement-editor-table-wrap"><table class="movement-editor-table movement-summary-table">
-        <thead><tr><th>Cuenta</th><th>Sistema</th><th>Caja / banco</th><th>Débitos pendientes</th><th>Créditos pendientes</th><th>Total absoluto</th><th></th></tr></thead>
+        <thead><tr><th>Cuenta</th><th>Moneda</th><th>Sistema</th><th>Caja / banco</th><th>Débitos pendientes</th><th>Créditos pendientes</th><th>Total absoluto</th><th></th></tr></thead>
         <tbody>${accountMetrics.length ? accountMetrics.map(({ account, metrics }) => {
           const debit = metrics.systemTotals.debit + metrics.bankTotals.debit;
           const credit = metrics.systemTotals.credit + metrics.bankTotals.credit;
           const modified = movementEditorAccountIsModified(account.snapshot.workspace.id);
-          return `<tr><td class="movement-summary-account"><strong>${escapeHtml(snapshotWorkspaceName(account.snapshot))}</strong>${modified ? `<small><i data-lucide="circle-dot"></i> Cambios sin descargar</small>` : ""}</td><td>${metrics.system.length.toLocaleString("es-UY")}</td><td>${metrics.bank.length.toLocaleString("es-UY")}</td><td class="amount">${formatMoney(debit)}</td><td class="amount negative">${formatMoney(credit)}</td><td class="amount">${formatMoney(metrics.pendingAbsolute)}</td><td class="movement-editor-actions"><button class="button button-secondary button-small" data-open-summary-account="${escapeAttribute(account.snapshot.workspace.id)}" type="button"><i data-lucide="table-pen"></i> Editar</button></td></tr>`;
-        }).join("") : `<tr><td colspan="7" class="account-empty-group">Agregue conciliaciones XLSX para ver el resumen.</td></tr>`}</tbody>
+          return `<tr><td class="movement-summary-account"><strong>${escapeHtml(snapshotWorkspaceName(account.snapshot))}</strong>${modified ? `<small><i data-lucide="circle-dot"></i> Cambios sin descargar</small>` : ""}</td><td><span class="currency-badge">${metrics.currency}</span></td><td>${metrics.system.length.toLocaleString("es-UY")}</td><td>${metrics.bank.length.toLocaleString("es-UY")}</td><td class="amount">${formatCurrencyAmount(debit, metrics.currency)}</td><td class="amount negative">${formatCurrencyAmount(credit, metrics.currency)}</td><td class="amount">${formatCurrencyAmount(metrics.pendingAbsolute, metrics.currency)}</td><td class="movement-editor-actions"><button class="button button-secondary button-small" data-open-summary-account="${escapeAttribute(account.snapshot.workspace.id)}" type="button"><i data-lucide="folder-open"></i> Abrir</button></td></tr>`;
+        }).join("") : `<tr><td colspan="8" class="account-empty-group">Agregue conciliaciones XLSX para ver el estado total.</td></tr>`}</tbody>
       </table></div>
     </section>
     <section class="movement-summary-section">
-      <div class="movement-summary-section-heading"><div><h4>Cruces posibles entre cuentas</h4><p>Al resolver un cruce, el movimiento se traslada a la cuenta elegida y queda conciliado allí. Ambos archivos se marcarán para descargar.</p></div><span>${candidates.length} sugerencia(s)</span></div>
+      <div class="movement-summary-section-heading"><div><h4>Cruces posibles entre cuentas</h4><p>Solo se comparan cuentas de la misma moneda. Al resolver un cruce, ambos archivos quedan marcados para descargar.</p></div><span>${candidates.length} sugerencia(s)</span></div>
       <div class="movement-editor-table-wrap"><table class="movement-editor-table movement-cross-table">
-        <thead><tr><th>Sistema</th><th>Caja / banco</th><th>Fecha</th><th>Importe</th><th>Coincidencia</th><th>Resolver en</th></tr></thead>
+        <thead><tr><th>Sistema</th><th>Caja / banco</th><th>Moneda</th><th>Fecha</th><th>Importe</th><th>Coincidencia</th><th>Resolver en</th></tr></thead>
         <tbody>${candidates.length ? candidates.map(candidate => {
           const systemDescription = summarizeCrossCandidateMovements(candidate.systemMovements);
           const bankDescription = summarizeCrossCandidateMovements(candidate.bankMovements);
           const systemDate = candidate.systemMovements[0].dateKey || toDateKey(reviveStoredDate(candidate.systemMovements[0].date));
+          const currency = workspaceCurrency(candidate.systemSnapshot);
           return `<tr>
           <td><strong>${escapeHtml(snapshotWorkspaceName(candidate.systemSnapshot))}</strong><span class="cross-description" title="${escapeAttribute(candidate.systemMovements.map(item => item.description).join(" | "))}">${escapeHtml(systemDescription)}</span></td>
           <td><strong>${escapeHtml(snapshotWorkspaceName(candidate.bankSnapshot))}</strong><span class="cross-description" title="${escapeAttribute(candidate.bankMovements.map(item => item.description).join(" | "))}">${escapeHtml(bankDescription)}</span></td>
+          <td><span class="currency-badge">${currency}</span></td>
           <td>${formatDateInput(systemDate)}${candidate.dateDifference ? `<small>${candidate.dateDifference} día(s)</small>` : ""}</td>
-          <td class="amount">${formatMoney(candidate.systemMagnitude)}${candidate.amountDifference ? `<small>Dif. ${formatMoney(candidate.amountDifference)}</small>` : ""}</td>
+          <td class="amount">${formatCurrencyAmount(candidate.systemMagnitude, currency)}${candidate.amountDifference ? `<small>Dif. ${formatCurrencyAmount(candidate.amountDifference, currency)}</small>` : ""}</td>
           <td><span class="cross-score">${candidate.score}%</span><small>${candidate.type === "one-to-one" ? "Uno a uno" : candidate.type === "many-to-one" ? `${candidate.systemMovements.length} a uno` : `Uno a ${candidate.bankMovements.length}`}${candidate.signCorrectionNeeded ? " · corrige signo" : ""}</small></td>
           <td><div class="cross-actions"><button class="button button-secondary button-small" data-resolve-cross="system" data-cross-id="${escapeAttribute(candidate.id)}" type="button">${escapeHtml(snapshotWorkspaceName(candidate.systemSnapshot))}</button><button class="button button-secondary button-small" data-resolve-cross="bank" data-cross-id="${escapeAttribute(candidate.id)}" type="button">${escapeHtml(snapshotWorkspaceName(candidate.bankSnapshot))}</button></div></td>
         </tr>`;
-        }).join("") : `<tr><td colspan="6" class="account-empty-group">No se encontraron coincidencias claras entre cuentas con el filtro actual.</td></tr>`}</tbody>
+        }).join("") : `<tr><td colspan="7" class="account-empty-group">No se encontraron coincidencias claras entre cuentas de la misma moneda.</td></tr>`}</tbody>
       </table></div>
     </section>`;
   dom.movementEditorContent.querySelectorAll("[data-open-summary-account]").forEach(button => button.addEventListener("click", () => {
@@ -2747,7 +2788,7 @@ function renderMovementEditorSummary() {
       showToast("No se pudo resolver", error.message || "El cruce dejó de estar disponible.", "error");
     }
   }));
-  dom.movementEditorPagination.innerHTML = `<span>${totalSystem + totalBank} pendientes en ${totalAccounts} cuenta(s)</span>`;
+  dom.movementEditorPagination.innerHTML = `<span>${totalSystem + totalBank} pendientes en ${totalAccounts} cuenta(s) · UYU y USD separados</span>`;
 }
 
 function renderMovementEditor() {
@@ -2755,11 +2796,11 @@ function renderMovementEditor() {
   const selected = movementEditorAccountById(editor.selectedAccountId);
   const summaryActive = editor.selectedAccountId === MOVEMENT_EDITOR_SUMMARY_ID;
   dom.movementEditorAccounts.innerHTML = editor.accounts.length
-    ? `<div class="movement-editor-account-list"><button class="movement-editor-account movement-editor-summary-account ${summaryActive ? "active" : ""}" type="button" data-movement-summary><strong>Resumen conjunto</strong><span>${editor.accounts.length}</span><small>Pendientes y cruces entre cuentas</small></button>${editor.accounts.map(account => {
+    ? `<div class="movement-editor-account-list"><button class="movement-editor-account movement-editor-summary-account ${summaryActive ? "active" : ""}" type="button" data-movement-summary><strong>Estado total</strong><span>${editor.accounts.length}</span><small>Pendientes, monedas y cruces</small></button>${editor.accounts.map(account => {
         const snapshot = account.snapshot;
         const metrics = movementEditorAccountMetrics(snapshot);
         const modified = movementEditorAccountIsModified(snapshot.workspace.id);
-        return `<button class="movement-editor-account ${snapshot.workspace.id === editor.selectedAccountId ? "active" : ""}" type="button" data-movement-account="${escapeAttribute(snapshot.workspace.id)}"><strong>${escapeHtml(snapshotWorkspaceName(snapshot))}</strong><span>${metrics.pendingCount.toLocaleString("es-UY")}</span><small>${metrics.system.length.toLocaleString("es-UY")} sistema · ${metrics.bank.length.toLocaleString("es-UY")} caja/banco${modified ? " · sin descargar" : ""}</small></button>`;
+        return `<button class="movement-editor-account ${snapshot.workspace.id === editor.selectedAccountId ? "active" : ""}" type="button" data-movement-account="${escapeAttribute(snapshot.workspace.id)}"><strong>${escapeHtml(snapshotWorkspaceName(snapshot))}</strong><span>${metrics.pendingCount.toLocaleString("es-UY")}</span><small><b>${metrics.currency}</b> · ${metrics.system.length.toLocaleString("es-UY")} sistema · ${metrics.bank.length.toLocaleString("es-UY")} caja/banco${modified ? " · sin descargar" : ""}</small></button>`;
       }).join("")}</div>`
     : `<div class="movement-editor-empty-accounts"><div><strong>No hay cuentas cargadas</strong><p>Agregue exportaciones de ConciliApp o cree una cuenta vacía.</p></div></div>`;
   dom.movementEditorAccounts.querySelector("[data-movement-summary]")?.addEventListener("click", () => {
@@ -2779,43 +2820,88 @@ function renderMovementEditor() {
     return;
   }
   if (!selected) {
-    dom.movementEditorContent.innerHTML = `<div class="movement-editor-placeholder"><div><strong>Agregue una o más conciliaciones</strong><p>Podrá ver los pendientes de todas juntas y resolver cruces entre cuentas.</p></div></div>`;
+    dom.movementEditorContent.innerHTML = `<div class="movement-editor-placeholder"><div><strong>Agregue una o más conciliaciones</strong><p>Podrá consultar el estado total y arrastrar pendientes entre meses.</p></div></div>`;
     dom.movementEditorPagination.innerHTML = "";
     syncMovementEditorButtons();
     refreshIcons(dom.movementEditorDialog);
     return;
   }
   const snapshot = selected.snapshot;
+  const accountId = snapshot.workspace.id;
+  const currency = workspaceCurrency(snapshot);
   const rows = movementEditorRows(snapshot);
   const totalPages = Math.max(1, Math.ceil(rows.length / 100));
   editor.page = clamp(editor.page, 1, totalPages);
   const visible = rows.slice((editor.page - 1) * 100, editor.page * 100);
-  const modified = movementEditorAccountIsModified(snapshot.workspace.id);
+  const modified = movementEditorAccountIsModified(accountId);
+  const selectedRefs = selectedPendingMovementRefs(snapshot);
+  const destinationAccounts = editor.accounts.filter(account => account.snapshot.workspace.id !== accountId && workspaceCurrency(account.snapshot) === currency);
+  const destinationOptions = destinationAccounts.map(account => `<option value="${escapeAttribute(account.snapshot.workspace.id)}">${escapeHtml(snapshotWorkspaceName(account.snapshot))}</option>`).join("");
   dom.movementEditorContent.innerHTML = `
     <div class="movement-editor-account-heading">
-      <div><h3>${escapeHtml(snapshotWorkspaceName(snapshot))}${modified ? `<span class="movement-account-unsaved">Cambios sin descargar</span>` : ""}</h3><p>${rows.length.toLocaleString("es-UY")} movimientos visibles · editar una fila conciliada deshace únicamente su conciliación.</p></div>
-      <div class="movement-editor-rename"><input data-movement-account-name type="text" maxlength="80" value="${escapeAttribute(snapshotWorkspaceName(snapshot))}"><button class="button button-secondary button-small" data-save-account-name type="button"><i data-lucide="pencil"></i> Renombrar</button></div>
+      <div><h3>${escapeHtml(snapshotWorkspaceName(snapshot))}<span class="currency-badge heading-currency">${currency}</span>${modified ? `<span class="movement-account-unsaved">Cambios sin descargar</span>` : ""}</h3><p>${rows.length.toLocaleString("es-UY")} movimientos visibles · las partidas arrastradas conservan su fecha original y no se eliminan del mes anterior.</p></div>
+      <div class="movement-editor-account-settings"><input data-movement-account-name type="text" maxlength="80" value="${escapeAttribute(snapshotWorkspaceName(snapshot))}"><select data-movement-account-currency aria-label="Moneda de la cuenta"><option value="UYU" ${currency === "UYU" ? "selected" : ""}>Pesos (UYU)</option><option value="USD" ${currency === "USD" ? "selected" : ""}>Dólares (USD)</option></select><button class="button button-secondary button-small" data-save-account-settings type="button"><i data-lucide="save"></i> Guardar datos</button></div>
     </div>
-    <div class="movement-editor-table-wrap"><table class="movement-editor-table">
-      <colgroup><col style="width:92px"><col style="width:115px"><col><col style="width:110px"><col style="width:110px"><col style="width:110px"><col style="width:92px"></colgroup>
-      <thead><tr><th>Fecha</th><th>Origen</th><th>Descripción</th><th>Débito</th><th>Crédito</th><th>Estado</th><th></th></tr></thead>
+    <div class="movement-account-actionbar">
+      <button class="button button-secondary button-small" data-new-movement type="button"><i data-lucide="plus"></i> Nuevo movimiento</button>
+      <button class="button button-secondary button-small" data-select-pending type="button"><i data-lucide="list-checks"></i> Seleccionar pendientes filtrados</button>
+      <button class="button button-quiet button-small" data-clear-pending-selection type="button" ${selectedRefs.length ? "" : "disabled"}><i data-lucide="x"></i> Limpiar (${selectedRefs.length})</button>
+      <label class="field inline movement-carry-destination"><span>Mes siguiente</span><select data-carry-destination ${destinationAccounts.length ? "" : "disabled"}><option value="">Seleccionar cuenta destino</option>${destinationOptions}</select></label>
+      <button class="button button-primary button-small" data-carry-selected type="button" ${selectedRefs.length && destinationAccounts.length ? "" : "disabled"}><i data-lucide="copy-plus"></i> Arrastrar seleccionadas (${selectedRefs.length})</button>
+    </div>
+    ${destinationAccounts.length ? "" : `<div class="movement-carry-note"><i data-lucide="info"></i><span>Para arrastrar partidas, cargue o cree otra cuenta en ${currency}. La cuenta anterior conservará sus pendientes.</span></div>`}
+    <div class="movement-editor-table-wrap"><table class="movement-editor-table movement-editor-account-table">
+      <colgroup><col style="width:42px"><col style="width:92px"><col style="width:115px"><col><col style="width:110px"><col style="width:110px"><col style="width:110px"><col style="width:92px"></colgroup>
+      <thead><tr><th></th><th>Fecha</th><th>Origen</th><th>Descripción</th><th>Débito</th><th>Crédito</th><th>Estado</th><th></th></tr></thead>
       <tbody>${visible.length ? visible.map(row => {
         const item = row.movement;
         const amounts = movementDebitCredit(item);
         const stateLabel = row.reservation === "confirmed" ? "Conciliado" : row.reservation === "possible" ? "Posible" : "Pendiente";
-        return `<tr><td>${escapeHtml(item.dateKey ? formatDateInput(item.dateKey) : formatDate(reviveStoredDate(item.date)))}</td><td><span class="movement-editor-source-badge">${row.sourceKey === "system" ? "Sistema" : "Caja / banco"}</span></td><td class="movement-editor-description" title="${escapeAttribute(item.description)}">${escapeHtml(item.description)}</td><td class="amount">${amounts.debit ? formatMoney(amounts.debit) : ""}</td><td class="amount negative">${amounts.credit ? formatMoney(amounts.credit) : ""}</td><td><span class="movement-editor-state-badge ${row.reservation === "pending" ? "" : row.reservation}">${stateLabel}</span></td><td class="movement-editor-actions"><button class="button button-secondary button-small" data-edit-movement data-source="${row.sourceKey}" data-id="${escapeAttribute(item.id)}" type="button"><i data-lucide="pencil"></i> Editar</button></td></tr>`;
-      }).join("") : `<tr><td colspan="7" class="account-empty-group">No hay movimientos para los filtros seleccionados.</td></tr>`}</tbody>
+        const key = movementEditorSelectionKey(accountId, row.sourceKey, item.id);
+        const selectable = row.reservation === "pending";
+        const originBadge = item.carryForwardFromAccount ? `<small class="movement-origin-note"><i data-lucide="copy"></i> Arrastrada desde ${escapeHtml(item.carryForwardFromAccount)}</small>` : item.manuallyAdded ? `<small class="movement-origin-note"><i data-lucide="plus"></i> Agregada manualmente</small>` : "";
+        return `<tr><td class="movement-select-cell">${selectable ? `<input type="checkbox" data-select-movement data-source="${row.sourceKey}" data-id="${escapeAttribute(item.id)}" ${editor.selectedMovements.has(key) ? "checked" : ""} aria-label="Seleccionar partida pendiente">` : ""}</td><td>${escapeHtml(item.dateKey ? formatDateInput(item.dateKey) : formatDate(reviveStoredDate(item.date)))}</td><td><span class="movement-editor-source-badge">${row.sourceKey === "system" ? "Sistema" : "Caja / banco"}</span></td><td class="movement-editor-description" title="${escapeAttribute(item.description)}"><span>${escapeHtml(item.description)}</span>${originBadge}</td><td class="amount">${amounts.debit ? formatCurrencyAmount(amounts.debit, currency) : ""}</td><td class="amount negative">${amounts.credit ? formatCurrencyAmount(amounts.credit, currency) : ""}</td><td><span class="movement-editor-state-badge ${row.reservation === "pending" ? "" : row.reservation}">${stateLabel}</span></td><td class="movement-editor-actions"><button class="button button-secondary button-small" data-edit-movement data-source="${row.sourceKey}" data-id="${escapeAttribute(item.id)}" type="button"><i data-lucide="pencil"></i> Editar</button></td></tr>`;
+      }).join("") : `<tr><td colspan="8" class="account-empty-group">No hay movimientos para los filtros seleccionados.</td></tr>`}</tbody>
     </table></div>`;
-  dom.movementEditorContent.querySelector("[data-save-account-name]").addEventListener("click", () => {
+  dom.movementEditorContent.querySelector("[data-save-account-settings]").addEventListener("click", () => {
     const name = dom.movementEditorContent.querySelector("[data-movement-account-name]").value.trim();
+    const nextCurrency = dom.movementEditorContent.querySelector("[data-movement-account-currency]").value;
     if (!name) return showToast("Nombre no válido", "La cuenta debe tener un nombre.", "error");
     snapshot.workspace.name = name;
+    snapshot.workspace.currency = normalizeWorkspaceCurrency(nextCurrency, name);
     snapshot.exportFileName = name;
     snapshot.savedAt = new Date().toISOString();
-    markMovementEditorAccountsModified(snapshot.workspace.id);
+    for (const key of [...editor.selectedMovements]) if (key.startsWith(`${accountId}:`)) editor.selectedMovements.delete(key);
+    markMovementEditorAccountsModified(accountId);
     renderMovementEditor();
   });
-  dom.movementEditorContent.querySelectorAll("[data-edit-movement]").forEach(button => button.addEventListener("click", () => openMovementEditDialog(snapshot.workspace.id, button.dataset.source, button.dataset.id)));
+  dom.movementEditorContent.querySelector("[data-new-movement]").addEventListener("click", () => openNewMovementDialog(accountId));
+  dom.movementEditorContent.querySelector("[data-select-pending]").addEventListener("click", () => {
+    for (const row of rows) if (row.reservation === "pending") editor.selectedMovements.add(movementEditorSelectionKey(accountId, row.sourceKey, row.movement.id));
+    renderMovementEditor();
+  });
+  dom.movementEditorContent.querySelector("[data-clear-pending-selection]").addEventListener("click", () => {
+    for (const key of [...editor.selectedMovements]) if (key.startsWith(`${accountId}:`)) editor.selectedMovements.delete(key);
+    renderMovementEditor();
+  });
+  dom.movementEditorContent.querySelectorAll("[data-select-movement]").forEach(input => input.addEventListener("change", event => {
+    const key = movementEditorSelectionKey(accountId, event.target.dataset.source, event.target.dataset.id);
+    if (event.target.checked) editor.selectedMovements.add(key);
+    else editor.selectedMovements.delete(key);
+    renderMovementEditor();
+  }));
+  dom.movementEditorContent.querySelector("[data-carry-selected]").addEventListener("click", () => {
+    const destinationId = dom.movementEditorContent.querySelector("[data-carry-destination]").value;
+    try {
+      const result = carryForwardSelectedMovements(accountId, destinationId);
+      renderMovementEditor();
+      const skipped = result.skipped ? ` ${result.skipped} ya existían o dejaron de estar pendientes.` : "";
+      showToast("Partidas arrastradas", `${result.copied} partida(s) se copiaron al mes siguiente en ${result.currency}.${skipped}`, "success", 8000);
+    } catch (error) {
+      showToast("No se pudieron arrastrar", error.message || "Revise la cuenta de destino.", "error", 8000);
+    }
+  });
+  dom.movementEditorContent.querySelectorAll("[data-edit-movement]").forEach(button => button.addEventListener("click", () => openMovementEditDialog(accountId, button.dataset.source, button.dataset.id)));
   renderMovementEditorPagination(totalPages, rows.length);
   syncMovementEditorButtons();
   refreshIcons(dom.movementEditorDialog);
@@ -2845,13 +2931,212 @@ function syncMovementEditorButtons() {
     : `<i data-lucide="save"></i> Guardar cambios`;
 }
 
+
+function movementEditorSelectionKey(accountId, sourceKey, movementId) {
+  return `${accountId}:${sourceKey}:${movementId}`;
+}
+
+function selectedPendingMovementRefs(snapshot) {
+  const accountId = snapshot?.workspace?.id;
+  const pending = {
+    system: new Set(snapshotPendingMovements(snapshot, "system").map(item => item.id)),
+    bank: new Set(snapshotPendingMovements(snapshot, "bank").map(item => item.id))
+  };
+  const refs = [];
+  for (const key of state.movementEditor.selectedMovements) {
+    const prefix = `${accountId}:`;
+    if (!key.startsWith(prefix)) continue;
+    const remainder = key.slice(prefix.length);
+    const separator = remainder.indexOf(":");
+    const sourceKey = remainder.slice(0, separator);
+    const movementId = remainder.slice(separator + 1);
+    if (["system", "bank"].includes(sourceKey) && pending[sourceKey].has(movementId)) refs.push({ sourceKey, movementId });
+  }
+  return refs;
+}
+
+function carryForwardRootKey(originSnapshot, sourceKey, movement) {
+  const rootWorkspaceId = movement.carryForwardRootWorkspaceId || originSnapshot.workspace.id;
+  const rootMovementId = movement.carryForwardRootMovementId || movement.id;
+  return `${rootWorkspaceId}:${sourceKey}:${rootMovementId}`;
+}
+
+function carryForwardPendingMovements(originSnapshot, destinationSnapshot, movementRefs) {
+  if (!originSnapshot || !destinationSnapshot || originSnapshot.workspace?.id === destinationSnapshot.workspace?.id) throw new Error("Seleccione una cuenta de otro mes como destino.");
+  const originCurrency = workspaceCurrency(originSnapshot);
+  const destinationCurrency = workspaceCurrency(destinationSnapshot);
+  if (originCurrency !== destinationCurrency) throw new Error(`No se pueden arrastrar partidas de ${originCurrency} a ${destinationCurrency}.`);
+  const refs = Array.isArray(movementRefs) ? movementRefs : [];
+  if (!refs.length) throw new Error("Seleccione al menos una partida pendiente.");
+  destinationSnapshot.sources ||= {};
+  destinationSnapshot.movementCarryLog ||= [];
+  const existingRoots = new Set();
+  for (const sourceKey of ["system", "bank"]) {
+    destinationSnapshot.sources[sourceKey] ||= { ...createEmptySource(sourceKey, sourceKey === "system" ? "Sistema contable" : "Caja o banco"), movements: [] };
+    destinationSnapshot.sources[sourceKey].movements ||= [];
+    for (const movement of destinationSnapshot.sources[sourceKey].movements) {
+      const rootWorkspaceId = movement.carryForwardRootWorkspaceId || movement.carryForwardFromWorkspaceId || "";
+      const rootMovementId = movement.carryForwardRootMovementId || "";
+      if (rootWorkspaceId && rootMovementId) existingRoots.add(`${rootWorkspaceId}:${sourceKey}:${rootMovementId}`);
+    }
+  }
+  const pendingBySource = {
+    system: new Map(snapshotPendingMovements(originSnapshot, "system").map(item => [item.id, item])),
+    bank: new Map(snapshotPendingMovements(originSnapshot, "bank").map(item => [item.id, item]))
+  };
+  const carriedAt = new Date().toISOString();
+  let copied = 0;
+  let skipped = 0;
+  for (const ref of refs) {
+    if (!["system", "bank"].includes(ref.sourceKey)) { skipped++; continue; }
+    const movement = pendingBySource[ref.sourceKey].get(ref.movementId);
+    if (!movement) { skipped++; continue; }
+    const rootKey = carryForwardRootKey(originSnapshot, ref.sourceKey, movement);
+    if (existingRoots.has(rootKey)) { skipped++; continue; }
+    const rootWorkspaceId = movement.carryForwardRootWorkspaceId || originSnapshot.workspace.id;
+    const rootMovementId = movement.carryForwardRootMovementId || movement.id;
+    const copiedMovement = {
+      ...cloneSnapshot(movement),
+      id: uniqueSnapshotMovementId(destinationSnapshot, ref.sourceKey),
+      source: ref.sourceKey,
+      carryForwardRootWorkspaceId: rootWorkspaceId,
+      carryForwardRootMovementId: rootMovementId,
+      carryForwardFromWorkspaceId: originSnapshot.workspace.id,
+      carryForwardFromAccount: snapshotWorkspaceName(originSnapshot),
+      carriedForwardAt: carriedAt,
+      carryForwardHistory: [
+        ...(Array.isArray(movement.carryForwardHistory) ? movement.carryForwardHistory : []),
+        { at: carriedAt, fromWorkspaceId: originSnapshot.workspace.id, fromAccount: snapshotWorkspaceName(originSnapshot), toWorkspaceId: destinationSnapshot.workspace.id, toAccount: snapshotWorkspaceName(destinationSnapshot) }
+      ]
+    };
+    destinationSnapshot.sources[ref.sourceKey].movements.push(copiedMovement);
+    destinationSnapshot.movementCarryLog.push({
+      id: `carry-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      at: carriedAt,
+      currency: originCurrency,
+      sourceKey: ref.sourceKey,
+      fromWorkspaceId: originSnapshot.workspace.id,
+      fromAccount: snapshotWorkspaceName(originSnapshot),
+      toWorkspaceId: destinationSnapshot.workspace.id,
+      toAccount: snapshotWorkspaceName(destinationSnapshot),
+      originalMovementId: movement.id,
+      rootMovementId,
+      newMovementId: copiedMovement.id,
+      dateKey: movement.dateKey || toDateKey(reviveStoredDate(movement.date)),
+      description: movement.description || "",
+      amount: Number(movement.amount) || 0
+    });
+    existingRoots.add(rootKey);
+    copied++;
+  }
+  for (const sourceKey of ["system", "bank"]) {
+    destinationSnapshot.sources[sourceKey].movements.sort((a, b) => String(a.dateKey || "").localeCompare(String(b.dateKey || "")) || Number(a.row || 0) - Number(b.row || 0));
+    destinationSnapshot.sources[sourceKey].restoredRowCount = destinationSnapshot.sources[sourceKey].movements.length;
+  }
+  if (copied) destinationSnapshot.savedAt = carriedAt;
+  return { copied, skipped, currency: originCurrency };
+}
+
+function createMovementInSnapshot(snapshot, changes) {
+  if (!snapshot || !["system", "bank"].includes(changes.sourceKey)) throw new Error("No se encontró la cuenta u origen seleccionado.");
+  const parsedDate = parseDateValue(changes.date);
+  const description = String(changes.description || "").trim();
+  const magnitude = roundMoney(Math.abs(Number(changes.amount) || 0));
+  if (!parsedDate) throw new Error("Ingrese una fecha válida.");
+  if (!description) throw new Error("Ingrese una descripción.");
+  if (magnitude <= 0) throw new Error("El importe debe ser mayor que cero.");
+  if (!["debit", "credit"].includes(changes.type)) throw new Error("Seleccione débito o crédito.");
+  snapshot.sources ||= {};
+  snapshot.sources[changes.sourceKey] ||= { ...createEmptySource(changes.sourceKey, changes.sourceKey === "system" ? "Sistema contable" : "Caja o banco"), movements: [] };
+  const list = snapshot.sources[changes.sourceKey].movements ||= [];
+  const at = new Date().toISOString();
+  const movement = {
+    id: uniqueSnapshotMovementId(snapshot, changes.sourceKey),
+    source: changes.sourceKey,
+    row: list.reduce((maximum, item) => Math.max(maximum, Number(item.row) || 0), 0) + 1,
+    date: parsedDate.toISOString(),
+    dateKey: toDateKey(parsedDate),
+    originalDate: changes.date,
+    description,
+    originalDescription: description,
+    amount: changes.type === "debit" ? magnitude : -magnitude,
+    debitAmount: changes.type === "debit" ? magnitude : 0,
+    creditAmount: changes.type === "credit" ? magnitude : 0,
+    originalAmount: magnitude,
+    type: changes.type,
+    status: String(changes.status || "").trim(),
+    rawValues: [],
+    manuallyAdded: true,
+    createdAt: at,
+    editHistory: []
+  };
+  list.push(movement);
+  list.sort((a, b) => String(a.dateKey || "").localeCompare(String(b.dateKey || "")) || Number(a.row || 0) - Number(b.row || 0));
+  snapshot.sources[changes.sourceKey].restoredRowCount = list.length;
+  snapshot.movementEditLog ||= [];
+  snapshot.movementEditLog.push({
+    id: `movement-create-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    at,
+    action: "create",
+    fromAccount: "",
+    toAccount: snapshotWorkspaceName(snapshot),
+    fromSource: "",
+    toSource: changes.sourceKey,
+    oldId: "",
+    newId: movement.id,
+    oldDateKey: "",
+    newDateKey: movement.dateKey,
+    oldDescription: "",
+    newDescription: movement.description,
+    oldType: "",
+    newType: changes.type,
+    oldAmount: 0,
+    newAmount: magnitude,
+    invalidated: 0
+  });
+  snapshot.savedAt = at;
+  return movement;
+}
+
+function openNewMovementDialog(accountId) {
+  const account = movementEditorAccountById(accountId);
+  if (!account) return;
+  state.movementEditor.editing = { isNew: true, accountId };
+  const form = dom.movementEditForm;
+  form.reset();
+  form.elements.namedItem("accountId").innerHTML = state.movementEditor.accounts.map(entry => `<option value="${escapeAttribute(entry.snapshot.workspace.id)}">${escapeHtml(snapshotWorkspaceName(entry.snapshot))} · ${workspaceCurrency(entry.snapshot)}</option>`).join("");
+  form.elements.namedItem("accountId").value = accountId;
+  form.elements.namedItem("sourceKey").value = "system";
+  form.elements.namedItem("date").value = toDateKey(new Date());
+  form.elements.namedItem("type").value = "debit";
+  document.getElementById("movementEditDialogTitle").textContent = "Agregar movimiento";
+  document.getElementById("movementEditDialogDescription").textContent = "Cree una partida manual y elija la cuenta, el origen y su tipo contable.";
+  document.getElementById("deleteMovementBtn").classList.add("hidden");
+  document.getElementById("movementEditWarning").classList.add("hidden");
+  dom.movementEditDialog.showModal();
+  refreshIcons(dom.movementEditDialog);
+}
+
+function carryForwardSelectedMovements(originAccountId, destinationAccountId) {
+  const origin = movementEditorAccountById(originAccountId);
+  const destination = movementEditorAccountById(destinationAccountId);
+  if (!origin || !destination) throw new Error("Seleccione una cuenta de destino válida.");
+  const refs = selectedPendingMovementRefs(origin.snapshot);
+  const result = carryForwardPendingMovements(origin.snapshot, destination.snapshot, refs);
+  if (result.copied) {
+    for (const ref of refs) state.movementEditor.selectedMovements.delete(movementEditorSelectionKey(originAccountId, ref.sourceKey, ref.movementId));
+    markMovementEditorAccountsModified(destinationAccountId);
+  }
+  return result;
+}
+
 function openMovementEditDialog(accountId, sourceKey, movementId) {
   const account = movementEditorAccountById(accountId);
   const movement = account?.snapshot.sources?.[sourceKey]?.movements?.find(item => item.id === movementId);
   if (!account || !movement) return;
   state.movementEditor.editing = { accountId, sourceKey, movementId };
   const form = dom.movementEditForm;
-  form.elements.namedItem("accountId").innerHTML = state.movementEditor.accounts.map(entry => `<option value="${escapeAttribute(entry.snapshot.workspace.id)}">${escapeHtml(snapshotWorkspaceName(entry.snapshot))}</option>`).join("");
+  form.elements.namedItem("accountId").innerHTML = state.movementEditor.accounts.map(entry => `<option value="${escapeAttribute(entry.snapshot.workspace.id)}">${escapeHtml(snapshotWorkspaceName(entry.snapshot))} · ${workspaceCurrency(entry.snapshot)}</option>`).join("");
   form.elements.namedItem("accountId").value = accountId;
   form.elements.namedItem("sourceKey").value = sourceKey;
   form.elements.namedItem("date").value = movement.dateKey || toDateKey(reviveStoredDate(movement.date));
@@ -2860,6 +3145,9 @@ function openMovementEditDialog(accountId, sourceKey, movementId) {
   form.elements.namedItem("amount").value = roundMoney(Math.max(amounts.debit, amounts.credit, Math.abs(Number(movement.amount) || 0)));
   form.elements.namedItem("description").value = movement.description || "";
   form.elements.namedItem("status").value = movement.status || "";
+  document.getElementById("movementEditDialogTitle").textContent = "Editar movimiento";
+  document.getElementById("movementEditDialogDescription").textContent = "El importe se escribe siempre en valor absoluto; el selector define si queda como débito o crédito.";
+  document.getElementById("deleteMovementBtn").classList.remove("hidden");
   const reservation = snapshotMovementReservation(account.snapshot).get(movementId);
   const warning = document.getElementById("movementEditWarning");
   warning.classList.toggle("hidden", !reservation);
@@ -3009,17 +3297,31 @@ function saveMovementEditorEdit(event) {
   const editing = state.movementEditor.editing;
   if (!editing) return;
   const data = new FormData(dom.movementEditForm);
+  const changes = {
+    accountId: String(data.get("accountId") || ""),
+    sourceKey: String(data.get("sourceKey") || ""),
+    date: String(data.get("date") || ""),
+    type: String(data.get("type") || ""),
+    amount: Number(data.get("amount")),
+    description: String(data.get("description") || ""),
+    status: String(data.get("status") || "")
+  };
   try {
-    const result = editMovementAcrossSnapshots(state.movementEditor.accounts.map(account => account.snapshot), editing, {
-      accountId: String(data.get("accountId") || ""),
-      sourceKey: String(data.get("sourceKey") || ""),
-      date: String(data.get("date") || ""),
-      type: String(data.get("type") || ""),
-      amount: Number(data.get("amount")),
-      description: String(data.get("description") || ""),
-      status: String(data.get("status") || "")
-    });
-    const destinationAccountId = String(data.get("accountId"));
+    const destinationAccountId = changes.accountId;
+    if (editing.isNew) {
+      const destination = movementEditorAccountById(destinationAccountId);
+      if (!destination) throw new Error("No se encontró la cuenta seleccionada.");
+      createMovementInSnapshot(destination.snapshot, changes);
+      state.movementEditor.selectedAccountId = destinationAccountId;
+      state.movementEditor.page = 1;
+      markMovementEditorAccountsModified(destinationAccountId);
+      state.movementEditor.editing = null;
+      dom.movementEditDialog.close();
+      renderMovementEditor();
+      showToast("Movimiento agregado", "La nueva partida quedó incorporada a la cuenta.", "success");
+      return;
+    }
+    const result = editMovementAcrossSnapshots(state.movementEditor.accounts.map(account => account.snapshot), editing, changes);
     state.movementEditor.selectedAccountId = destinationAccountId;
     state.movementEditor.page = 1;
     markMovementEditorAccountsModified(editing.accountId, destinationAccountId);
@@ -3035,7 +3337,7 @@ function saveMovementEditorEdit(event) {
 
 function deleteMovementEditorMovement() {
   const editing = state.movementEditor.editing;
-  if (!editing) return;
+  if (!editing || editing.isNew) return;
   try {
     const result = deleteMovementAcrossSnapshots(state.movementEditor.accounts.map(account => account.snapshot), editing);
     markMovementEditorAccountsModified(editing.accountId);
@@ -3071,7 +3373,7 @@ function openPostSaveMovementAccount() {
 
 function movementEditExportRow(item) {
   return [
-    item.action === "move" ? "Mover de cuenta" : item.action === "change-source" ? "Cambiar origen" : item.action === "delete" ? "Eliminar" : "Editar",
+    item.action === "move" ? "Mover de cuenta" : item.action === "change-source" ? "Cambiar origen" : item.action === "delete" ? "Eliminar" : item.action === "create" ? "Agregar" : "Editar",
     formatDateTime(reviveStoredDate(item.at) || new Date()),
     item.fromAccount || "",
     item.toAccount || "",
@@ -3091,6 +3393,23 @@ function movementEditExportRow(item) {
   ];
 }
 
+function carryForwardExportRow(item) {
+  const amount = Number(item.amount) || 0;
+  return [
+    formatDateTime(reviveStoredDate(item.at) || new Date()),
+    item.currency || "UYU",
+    item.fromAccount || "",
+    item.toAccount || "",
+    item.sourceKey === "system" ? "Sistema contable" : "Caja o banco",
+    item.dateKey ? formatDateInput(item.dateKey) : "",
+    item.description || "",
+    amount > 0 ? amount : 0,
+    amount < 0 ? Math.abs(amount) : 0,
+    item.rootMovementId || item.originalMovementId || "",
+    item.newMovementId || ""
+  ];
+}
+
 function snapshotMovementEditorExportRow(movement) {
   const amounts = movementDebitCredit(movement);
   return [movement.row || "", movement.dateKey ? formatDateInput(movement.dateKey) : formatDate(reviveStoredDate(movement.date)), movement.description || "", amounts.debit, amounts.credit, movementTypeLabel(amounts.credit > 0 ? "credit" : "debit"), movement.status || "", movement.id || ""];
@@ -3100,10 +3419,12 @@ function buildMovementEditorWorkbook(snapshot) {
   const workbook = XLSX.utils.book_new();
   const summary = XLSX.utils.aoa_to_sheet([
     ["Cuenta", snapshotWorkspaceName(snapshot)],
+    ["Moneda", workspaceCurrency(snapshot)],
     ["Movimientos del sistema", snapshot.sources.system.movements.length],
     ["Movimientos de caja o banco", snapshot.sources.bank.movements.length],
     ["Conciliaciones conservadas", snapshot.results?.reconciliations?.length || 0],
     ["Ediciones registradas", snapshot.movementEditLog?.length || 0],
+    ["Partidas arrastradas", snapshot.movementCarryLog?.length || 0],
     ["Generado", formatDateTime(new Date())]
   ]);
   appendSheet(workbook, summary, "Resumen edición");
@@ -3116,6 +3437,10 @@ function buildMovementEditorWorkbook(snapshot) {
   }
   if ((snapshot.movementEditLog || []).length) {
     appendSheet(workbook, createStyledDataSheet(["Acción", "Fecha y hora", "Cuenta origen", "Cuenta destino", "Origen anterior", "Origen nuevo", "ID anterior", "ID nuevo", "Fecha anterior", "Fecha nueva", "Descripción anterior", "Descripción nueva", "Tipo anterior", "Tipo nuevo", "Importe anterior", "Importe nuevo", "Conciliaciones deshechas"], snapshot.movementEditLog.map(movementEditExportRow), { fill: "F3F0EB", numericColumns: [14, 15, 16] }), "Ediciones de movimientos");
+  }
+  if ((snapshot.movementCarryLog || []).length) {
+    const carryHeaders = ["Fecha y hora", "Moneda", "Cuenta origen", "Cuenta destino", "Origen del movimiento", "Fecha del movimiento", "Descripción", "Débito", "Crédito", "ID raíz", "ID en destino"];
+    appendSheet(workbook, createStyledDataSheet(carryHeaders, snapshot.movementCarryLog.map(carryForwardExportRow), { fill: "EDF5FA", numericColumns: [7, 8] }), "Partidas arrastradas");
   }
   appendSheet(workbook, createApplicationStateSheet(snapshot), STATE_SHEET_NAME);
   hideWorkbookSheet(workbook, STATE_SHEET_NAME);
@@ -5500,6 +5825,14 @@ function createStateSnapshot() {
     transferOriginId: movement.transferOriginId || "",
     transferOriginAccount: movement.transferOriginAccount || "",
     transferHistory: Array.isArray(movement.transferHistory) ? movement.transferHistory : [],
+    carryForwardRootWorkspaceId: movement.carryForwardRootWorkspaceId || "",
+    carryForwardRootMovementId: movement.carryForwardRootMovementId || "",
+    carryForwardFromWorkspaceId: movement.carryForwardFromWorkspaceId || "",
+    carryForwardFromAccount: movement.carryForwardFromAccount || "",
+    carryForwardHistory: Array.isArray(movement.carryForwardHistory) ? movement.carryForwardHistory : [],
+    carriedForwardAt: movement.carriedForwardAt instanceof Date ? movement.carriedForwardAt.toISOString() : movement.carriedForwardAt || "",
+    manuallyAdded: Boolean(movement.manuallyAdded),
+    createdAt: movement.createdAt instanceof Date ? movement.createdAt.toISOString() : movement.createdAt || "",
     editedAt: movement.editedAt instanceof Date ? movement.editedAt.toISOString() : movement.editedAt || "",
     editHistory: Array.isArray(movement.editHistory) ? movement.editHistory : []
   });
@@ -5553,10 +5886,12 @@ function createStateSnapshot() {
     savedAt: new Date().toISOString(),
     workspace: {
       id: state.workspace?.id || createWorkspaceState().id,
-      name: getCurrentWorkspaceName()
+      name: getCurrentWorkspaceName(),
+      currency: normalizeWorkspaceCurrency(state.workspace?.currency, getCurrentWorkspaceName())
     },
     transferLog: (state.transferLog || []).map(item => ({ ...item, at: item.at instanceof Date ? item.at.toISOString() : item.at })),
     movementEditLog: (state.movementEditLog || []).map(item => ({ ...item, at: item.at instanceof Date ? item.at.toISOString() : item.at })),
+    movementCarryLog: (state.movementCarryLog || []).map(item => ({ ...item, at: item.at instanceof Date ? item.at.toISOString() : item.at })),
     exportFileName: document.getElementById("exportFileName")?.value.trim() || "",
     config: { ...state.config },
     sources: {
@@ -5603,11 +5938,12 @@ function restoreStateSnapshot(snapshot) {
   terminateProcessingWorker();
   state.processing = { cancelled: false, running: false, worker: null, jobId: null };
   state.config = { ...DEFAULT_CONFIG, ...(snapshot.config || {}) };
-  state.workspace = createWorkspaceState(snapshot.workspace?.id, snapshot.workspace?.name || snapshot.exportFileName || "");
+  state.workspace = createWorkspaceState(snapshot.workspace?.id, snapshot.workspace?.name || snapshot.exportFileName || "", normalizeWorkspaceCurrency(snapshot.workspace?.currency, snapshot.workspace?.name || snapshot.exportFileName || ""));
   state.accountTransfer = createAccountTransferState();
   state.movementEditor = createMovementEditorState();
   state.transferLog = (snapshot.transferLog || []).map(item => ({ ...item, at: reviveStoredDate(item.at) || item.at }));
   state.movementEditLog = (snapshot.movementEditLog || []).map(item => ({ ...item, at: reviveStoredDate(item.at) || item.at }));
+  state.movementCarryLog = (snapshot.movementCarryLog || []).map(item => ({ ...item, at: reviveStoredDate(item.at) || item.at }));
   const restoreSource = (sourceKey, label) => {
     const saved = snapshot.sources?.[sourceKey] || {};
     const movements = (saved.movements || []).map(item => ({ ...item, date: reviveStoredDate(item.date) }));
@@ -5950,6 +6286,7 @@ function exportWorkbook() {
       ["Fecha y hora de procesamiento", formatDateTime(processingDate)],
       ["Tabla del sistema", state.sources.system.name || state.sources.system.label],
       ["Tabla de caja o banco", state.sources.bank.name || state.sources.bank.label],
+      ["Moneda de la cuenta", normalizeWorkspaceCurrency(state.workspace?.currency, getCurrentWorkspaceName())],
       ["Movimientos activos del sistema", summary.totalSystem],
       ["Movimientos activos de caja o banco", summary.totalBank],
       ["Movimientos excluidos por período", summary.excludedCount],
@@ -6019,6 +6356,11 @@ function exportWorkbook() {
     if ((state.movementEditLog || []).length) {
       const editHeaders = ["Acción", "Fecha y hora", "Cuenta origen", "Cuenta destino", "Origen anterior", "Origen nuevo", "ID anterior", "ID nuevo", "Fecha anterior", "Fecha nueva", "Descripción anterior", "Descripción nueva", "Tipo anterior", "Tipo nuevo", "Importe anterior", "Importe nuevo", "Conciliaciones deshechas"];
       appendSheet(workbook, createStyledDataSheet(editHeaders, state.movementEditLog.map(movementEditExportRow), { fill: "F3F0EB", numericColumns: [14, 15, 16] }), "Ediciones de movimientos");
+    }
+
+    if ((state.movementCarryLog || []).length) {
+      const carryHeaders = ["Fecha y hora", "Moneda", "Cuenta origen", "Cuenta destino", "Origen del movimiento", "Fecha del movimiento", "Descripción", "Débito", "Crédito", "ID raíz", "ID en destino"];
+      appendSheet(workbook, createStyledDataSheet(carryHeaders, state.movementCarryLog.map(carryForwardExportRow), { fill: "EDF5FA", numericColumns: [7, 8] }), "Partidas arrastradas");
     }
 
     if (summary.excludedCount) {
@@ -6269,6 +6611,10 @@ function formatMoney(value) {
   return new Intl.NumberFormat("es-UY", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value) || 0);
 }
 
+function formatCurrencyAmount(value, currency = "UYU") {
+  return `${normalizeWorkspaceCurrency(currency)} ${formatMoney(value)}`;
+}
+
 function formatDecimal(value, digits = 2) {
   return new Intl.NumberFormat("es-UY", { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(Number(value) || 0);
 }
@@ -6394,6 +6740,9 @@ function yieldToMain() {
 window.ReconciliationApp = Object.freeze({
   APP_BUILD,
   DEFAULT_CONFIG,
+  normalizeWorkspaceCurrency,
+  inferWorkspaceCurrency,
+  workspaceCurrency,
   parseAmount,
   parseDateValue,
   normalizeDescription,
@@ -6431,6 +6780,8 @@ window.ReconciliationApp = Object.freeze({
   editMovementAcrossSnapshots,
   deleteMovementAcrossSnapshots,
   createEmptyMovementSnapshot,
+  createMovementInSnapshot,
+  carryForwardPendingMovements,
   persistSnapshot,
   readPersistedSnapshot,
   readSavedWorkspaceSnapshots,

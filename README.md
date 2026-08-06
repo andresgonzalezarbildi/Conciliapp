@@ -34,13 +34,16 @@ I also learned that an accounting reconciliation should not treat an approximate
 
 Finally, working with thousands of transactions showed the difference between optimizing calculation time and improving the complete user experience. Estimating workload, keeping the interface responsive, supporting cancellation, preserving progress, and limiting combinations are all parts of the same problem.
 
-## Conciliación múltiple y editor previo
+## Estado de cuentas, edición y partidas conciliatorias
 
 ConciliApp conserva únicamente la sesión activa para recuperación automática. Al pulsar **Nueva conciliación**, se elimina esa sesión y cualquier conciliación local anterior.
 
-El **Editor de movimientos** funciona antes del proceso de conciliación y abre mostrando los movimientos pendientes. Permite cargar varias conciliaciones XLSX, editar fecha, descripción, monto, origen y tipo débito/crédito, eliminar movimientos y trasladarlos entre cuentas. Al guardar, se descargan todos los archivos modificados; si solo se editó una cuenta, la aplicación ofrece abrirla para conciliar o continuar editando.
+La vista **Estado y movimientos** funciona antes del proceso de conciliación. Permite cargar varias conciliaciones XLSX, consultar el estado total, agregar movimientos manuales, editar fecha, descripción, monto, origen y tipo débito/crédito, eliminar movimientos y trasladarlos entre cuentas. Al guardar, se descargan todos los archivos modificados; si solo se editó una cuenta, la aplicación ofrece abrirla para conciliar o continuar editando.
 
-La vista **Resumen conjunto** muestra los pendientes de todas las cuentas cargadas y propone cruces entre cuentas por fecha, importe, descripción y referencia. También detecta agrupaciones uno-a-varios o varios-a-uno, como un recibo único contra varios movimientos UTE. Al resolver un cruce, el movimiento se traslada a la cuenta elegida, se corrige el signo cuando corresponde y se crea una conciliación confirmada dentro de esa cuenta, manteniendo la trazabilidad en las exportaciones.
+La vista **Estado total** muestra los pendientes de todas las cuentas cargadas y propone cruces entre cuentas por fecha, importe, descripción y referencia. Cada cuenta declara su moneda (UYU o USD): los totales se presentan por separado y nunca se sugieren cruces entre monedas distintas. También detecta agrupaciones uno-a-varios o varios-a-uno, como un recibo único contra varios movimientos UTE.
+Las partidas pendientes pueden seleccionarse y **arrastrarse al mes siguiente**. El movimiento se copia a la cuenta destino conservando fecha, importe, signo y origen, mientras permanece en el archivo del mes anterior. La aplicación registra la cadena de arrastre, evita duplicar la misma partida y exporta una hoja específica de trazabilidad.
+
+Al resolver un cruce, el movimiento se traslada a la cuenta elegida, se corrige el signo cuando corresponde y se crea una conciliación confirmada dentro de esa cuenta, manteniendo la trazabilidad en las exportaciones.
 
 El motor de conciliación resuelve importes repetidos mediante una asignación global y evita confirmar automáticamente agrupaciones de signos mezclados o compensaciones internas sin evidencia suficiente.
 

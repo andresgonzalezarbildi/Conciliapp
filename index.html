@@ -7,10 +7,10 @@
   <meta name="description" content="Herramienta local para conciliación de movimientos contables, de caja y banco.">
   <title>Conciliación contable</title>
   <link rel="icon" href="favicon.png" type="image/png">
-  <link rel="stylesheet" href="styles.css?v=20260804-4">
+  <link rel="stylesheet" href="styles.css?v=20260806-1">
   <script defer src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script defer src="app.js?v=20260804-4"></script>
+  <script defer src="app.js?v=20260806-1"></script>
 </head>
 <body>
   <header class="app-header">
@@ -25,7 +25,7 @@
       <a class="hub-link" href="https://andresgonzalez.netlify.app/" title="Volver al inicio" aria-label="Volver al hub inicial"><i data-lucide="layout-grid"></i><span>Inicio</span></a>
       <span class="privacy-chip" title="Los datos permanecen en este navegador"><i data-lucide="hard-drive"></i><span id="localSaveStatus">Guardado local automático</span></span>
       <button id="headerMovementEditorBtn" class="button button-ghost button-small" type="button">
-        <i data-lucide="table-pen"></i> Editor de movimientos
+        <i data-lucide="layout-dashboard"></i> Estado y movimientos
       </button>
       <button id="newReconciliationBtn" class="button button-ghost button-small" type="button">
         <i data-lucide="rotate-ccw"></i> Nueva conciliación
@@ -59,7 +59,7 @@
             </div>
             <div class="button-row">
               <button id="startBtn" class="button button-primary" type="button">Comenzar conciliación <i data-lucide="arrow-right"></i></button>
-              <button id="openMovementEditorBtn" class="button button-secondary" type="button"><i data-lucide="table-pen"></i> Editar movimientos y cuentas</button>
+              <button id="openMovementEditorBtn" class="button button-secondary" type="button"><i data-lucide="layout-dashboard"></i> Estado y movimientos</button>
               <button id="resumeReconciliationBtn" class="button button-secondary" type="button"><i data-lucide="folder-up"></i> Continuar conciliación anterior</button>
               <input id="resumeReconciliationInput" type="file" accept=".xlsx" hidden>
               <button class="button button-secondary" type="button" data-open-formats><i data-lucide="table-properties"></i> Ver formatos admitidos</button>
@@ -332,14 +332,15 @@
   <dialog id="movementEditorDialog" class="modal modal-extra-wide movement-editor-dialog">
     <div class="modal-card movement-editor-card">
       <div class="modal-header movement-editor-header">
-        <div><h2>Editor de movimientos y cuentas</h2><p>Corrija los datos antes de conciliar. Puede cambiar cuenta, origen, fecha, descripción, importe y débito/crédito.</p></div>
+        <div><h2>Estado de cuentas y movimientos</h2><p>Consulte el estado total, arrastre partidas pendientes a meses siguientes y corrija o agregue movimientos.</p></div>
         <button class="icon-button" data-close-movement-editor type="button" aria-label="Cerrar"><i data-lucide="x"></i></button>
       </div>
       <div class="movement-editor-loader">
         <div class="movement-editor-session-note"><i data-lucide="layers-3"></i><div><strong>Sesión de edición</strong><span>Agregue todas las conciliaciones que quiera revisar juntas. No se guardan como historial local.</span></div></div>
         <button id="addMovementAccountFilesBtn" class="button button-secondary" type="button"><i data-lucide="files"></i> Agregar conciliaciones XLSX</button>
         <input id="movementEditorFilesInput" type="file" accept=".xlsx" multiple hidden>
-        <label class="field movement-editor-new-account"><span>Nueva cuenta vacía</span><input id="newMovementAccountName" type="text" maxlength="80" placeholder="Ej.: ITAU $"></label>
+        <label class="field movement-editor-new-account"><span>Nueva cuenta vacía</span><input id="newMovementAccountName" type="text" maxlength="80" placeholder="Ej.: ITAU agosto"></label>
+        <label class="field movement-editor-new-currency"><span>Moneda</span><select id="newMovementAccountCurrency"><option value="UYU">Pesos (UYU)</option><option value="USD">Dólares (USD)</option></select></label>
         <button id="createMovementAccountBtn" class="button button-secondary" type="button"><i data-lucide="plus"></i> Crear cuenta</button>
       </div>
       <div class="movement-editor-toolbar">
@@ -374,7 +375,7 @@
 
   <dialog id="movementEditDialog" class="modal">
     <form id="movementEditForm" class="modal-card movement-edit-card">
-      <div class="modal-header"><div><h2>Editar movimiento</h2><p>El importe se escribe siempre en valor absoluto; el selector define si queda como débito o crédito.</p></div><button class="icon-button" data-close-movement-edit type="button" aria-label="Cerrar"><i data-lucide="x"></i></button></div>
+      <div class="modal-header"><div><h2 id="movementEditDialogTitle">Editar movimiento</h2><p id="movementEditDialogDescription">El importe se escribe siempre en valor absoluto; el selector define si queda como débito o crédito.</p></div><button class="icon-button" data-close-movement-edit type="button" aria-label="Cerrar"><i data-lucide="x"></i></button></div>
       <div id="movementEditWarning" class="inline-warning hidden"></div>
       <div class="movement-edit-grid">
         <label class="field"><span>Cuenta</span><select name="accountId" required></select></label>
