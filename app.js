@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_BUILD = "2026.08.06-1";
+const APP_BUILD = "2026.08.06-2";
 const STATE_SCHEMA_VERSION = 1;
 const STATE_SHEET_NAME = "Estado ConciliApp";
 const STATE_CHUNK_SIZE = 30000;
@@ -5083,12 +5083,17 @@ function calculateSummary() {
   const total = totalSystem + totalBank;
   const confirmedIds = getConfirmedIds();
   const reservedIds = getReservedIds();
-  const confirmedCount = confirmedIds.system.size + confirmedIds.bank.size;
-  const possibleCount = (reservedIds.system.size - confirmedIds.system.size) + (reservedIds.bank.size - confirmedIds.bank.size);
+  const confirmedSystemCount = confirmedIds.system.size;
+  const confirmedBankCount = confirmedIds.bank.size;
+  const confirmedCount = confirmedSystemCount + confirmedBankCount;
+  const possibleSystemCount = reservedIds.system.size - confirmedSystemCount;
+  const possibleBankCount = reservedIds.bank.size - confirmedBankCount;
+  const possibleCount = possibleSystemCount + possibleBankCount;
   const pendingSystem = getPendingMovements("system");
   const pendingBank = getPendingMovements("bank");
   const pendingCount = pendingSystem.length + pendingBank.length;
   const confirmedReconciliations = state.results.reconciliations.filter(item => item.status === "confirmed");
+  const possibleReconciliations = state.results.reconciliations.filter(item => item.status === "possible");
   const reconciledAmount = confirmedReconciliations.reduce((sum, item) => sum + Math.abs(item.totalSystem), 0);
   const pendingSystemAmount = pendingSystem.reduce((sum, item) => sum + comparisonAmount(item), 0);
   const pendingBankAmount = pendingBank.reduce((sum, item) => sum + comparisonAmount(item), 0);
@@ -5098,21 +5103,29 @@ function calculateSummary() {
     system: new Set(excludedSystem.map(item => item.id)),
     bank: new Set(excludedBank.map(item => item.id))
   };
-  const activeAbsoluteAmount = roundMoney(
-    state.sources.system.movements.filter(item => !excludedIds.system.has(item.id)).reduce((sum, item) => sum + Math.abs(comparisonAmount(item)), 0)
-    + state.sources.bank.movements.filter(item => !excludedIds.bank.has(item.id)).reduce((sum, item) => sum + Math.abs(comparisonAmount(item)), 0)
-  );
-  const confirmedAbsoluteAmount = roundMoney(
-    state.sources.system.movements.filter(item => confirmedIds.system.has(item.id)).reduce((sum, item) => sum + Math.abs(comparisonAmount(item)), 0)
-    + state.sources.bank.movements.filter(item => confirmedIds.bank.has(item.id)).reduce((sum, item) => sum + Math.abs(comparisonAmount(item)), 0)
-  );
+  const activeSystemMovements = state.sources.system.movements.filter(item => !excludedIds.system.has(item.id));
+  const activeBankMovements = state.sources.bank.movements.filter(item => !excludedIds.bank.has(item.id));
+  const activeSystemAbsoluteAmount = roundMoney(activeSystemMovements.reduce((sum, item) => sum + Math.abs(comparisonAmount(item)), 0));
+  const activeBankAbsoluteAmount = roundMoney(activeBankMovements.reduce((sum, item) => sum + Math.abs(comparisonAmount(item)), 0));
+  const confirmedSystemAbsoluteAmount = roundMoney(activeSystemMovements.filter(item => confirmedIds.system.has(item.id)).reduce((sum, item) => sum + Math.abs(comparisonAmount(item)), 0));
+  const confirmedBankAbsoluteAmount = roundMoney(activeBankMovements.filter(item => confirmedIds.bank.has(item.id)).reduce((sum, item) => sum + Math.abs(comparisonAmount(item)), 0));
+  const activeAbsoluteAmount = roundMoney(activeSystemAbsoluteAmount + activeBankAbsoluteAmount);
+  const confirmedAbsoluteAmount = roundMoney(confirmedSystemAbsoluteAmount + confirmedBankAbsoluteAmount);
+  const systemAmountPercentage = activeSystemAbsoluteAmount ? confirmedSystemAbsoluteAmount / activeSystemAbsoluteAmount * 100 : null;
+  const bankAmountPercentage = activeBankAbsoluteAmount ? confirmedBankAbsoluteAmount / activeBankAbsoluteAmount * 100 : null;
+  const sideAmountPercentages = [systemAmountPercentage, bankAmountPercentage].filter(value => value !== null);
+  const amountPercentage = sideAmountPercentages.length ? sideAmountPercentages.reduce((sum, value) => sum + value, 0) / sideAmountPercentages.length : 0;
   const incomingTransfers = (state.transferLog || []).filter(item => item.direction === "in");
   const outgoingTransfers = (state.transferLog || []).filter(item => item.direction === "out");
   return {
     total,
     totalSystem,
     totalBank,
+    confirmedSystemCount,
+    confirmedBankCount,
     confirmedCount,
+    possibleSystemCount,
+    possibleBankCount,
     possibleCount,
     pendingCount,
     pendingSystem,
@@ -5123,15 +5136,21 @@ function calculateSummary() {
     reconciledAmount: roundMoney(reconciledAmount),
     pendingDifference,
     pendingAbsoluteAmount,
+    activeSystemAbsoluteAmount,
+    activeBankAbsoluteAmount,
+    confirmedSystemAbsoluteAmount,
+    confirmedBankAbsoluteAmount,
     activeAbsoluteAmount,
     confirmedAbsoluteAmount,
     percentage: total ? confirmedCount / total * 100 : 0,
-    amountPercentage: activeAbsoluteAmount ? confirmedAbsoluteAmount / activeAbsoluteAmount * 100 : 0,
+    systemAmountPercentage: systemAmountPercentage ?? 0,
+    bankAmountPercentage: bankAmountPercentage ?? 0,
+    amountPercentage,
     incomingTransfers,
     outgoingTransfers,
     transferCount: incomingTransfers.length + outgoingTransfers.length,
     confirmedReconciliations: confirmedReconciliations.length,
-    possibleReconciliations: state.results.reconciliations.filter(item => item.status === "possible").length
+    possibleReconciliations: possibleReconciliations.length
   };
 }
 
@@ -5213,18 +5232,46 @@ function renderReview() {
   syncReviewControls();
   const summary = calculateSummary();
   const cards = [
-    ["Movimientos activos", summary.total.toLocaleString("es-UY"), ""],
-    ["Conciliados", summary.confirmedCount.toLocaleString("es-UY"), "success"],
-    ["Posibles", summary.possibleCount.toLocaleString("es-UY"), "warning"],
-    ["Pendientes", summary.pendingCount.toLocaleString("es-UY"), "danger"],
-    ["Excluidos", summary.excludedCount.toLocaleString("es-UY"), summary.excludedCount ? "warning" : ""],
-    ["Importe conciliado", formatMoney(summary.reconciledAmount), "success"],
-    ["Pendiente absoluto", formatMoney(summary.pendingAbsoluteAmount), summary.pendingAbsoluteAmount ? "danger" : "success"],
-    ["Diferencia neta", formatMoney(summary.pendingDifference), summary.pendingDifference ? "danger" : "success"],
-    ["Avance por filas", `${formatDecimal(summary.percentage, 1)}%`, "success"],
-    ["Avance por importe", `${formatDecimal(summary.amountPercentage, 1)}%`, "success"]
+    {
+      label: "Avance por movimientos",
+      value: `${formatDecimal(summary.percentage, 1)}%`,
+      detail: `${summary.confirmedCount.toLocaleString("es-UY")} de ${summary.total.toLocaleString("es-UY")} movimientos`,
+      type: "progress success",
+      progress: summary.percentage
+    },
+    {
+      label: "Cobertura por importe",
+      value: `${formatDecimal(summary.amountPercentage, 1)}%`,
+      detail: `Sistema ${summary.activeSystemAbsoluteAmount ? `${formatDecimal(summary.systemAmountPercentage, 1)}%` : "—"} · Caja/banco ${summary.activeBankAbsoluteAmount ? `${formatDecimal(summary.bankAmountPercentage, 1)}%` : "—"}`,
+      type: "progress success",
+      progress: summary.amountPercentage
+    },
+    {
+      label: "Conciliaciones confirmadas",
+      value: summary.confirmedReconciliations.toLocaleString("es-UY"),
+      detail: `${summary.confirmedSystemCount.toLocaleString("es-UY")} movimientos del sistema · ${summary.confirmedBankCount.toLocaleString("es-UY")} de caja/banco`,
+      type: "success"
+    },
+    {
+      label: "Propuestas a revisar",
+      value: summary.possibleReconciliations.toLocaleString("es-UY"),
+      detail: `${summary.possibleCount.toLocaleString("es-UY")} movimientos involucrados`,
+      type: summary.possibleReconciliations ? "warning" : "success"
+    },
+    {
+      label: "Movimientos pendientes",
+      value: summary.pendingCount.toLocaleString("es-UY"),
+      detail: `${summary.pendingSystem.length.toLocaleString("es-UY")} del sistema · ${summary.pendingBank.length.toLocaleString("es-UY")} de caja/banco`,
+      type: summary.pendingCount ? "danger" : "success"
+    }
   ];
-  dom.summaryCards.innerHTML = cards.map(([label, value, type]) => `<div class="summary-card ${type}"><span title="${escapeAttribute(label)}">${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  if (summary.excludedCount) cards.push({
+    label: "Fuera del período",
+    value: summary.excludedCount.toLocaleString("es-UY"),
+    detail: `${summary.excludedSystem.length.toLocaleString("es-UY")} del sistema · ${summary.excludedBank.length.toLocaleString("es-UY")} de caja/banco`,
+    type: "warning"
+  });
+  dom.summaryCards.innerHTML = cards.map(card => `<article class="summary-card ${card.type}"><span>${escapeHtml(card.label)}</span><strong>${escapeHtml(card.value)}</strong><small>${escapeHtml(card.detail)}</small>${Number.isFinite(card.progress) ? `<div class="summary-progress" role="progressbar" aria-label="${escapeAttribute(card.label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(clamp(card.progress, 0, 100))}"><i style="width:${clamp(card.progress, 0, 100)}%"></i></div>` : ""}</article>`).join("");
   document.querySelectorAll("[data-review-tab]").forEach(button => button.classList.toggle("active", button.dataset.reviewTab === state.review.tab));
   document.querySelector('[data-tab-count="confirmed"]').textContent = summary.confirmedReconciliations;
   document.querySelector('[data-tab-count="possible"]').textContent = summary.possibleReconciliations;
@@ -6248,17 +6295,16 @@ function updateLocalSaveStatus(message) {
 function renderExportSummary() {
   const summary = calculateSummary();
   document.getElementById("exportSummary").innerHTML = [
-    ["Conciliaciones", summary.confirmedReconciliations],
-    ["Posibles", summary.possibleReconciliations],
-    ["Pendientes", summary.pendingCount],
+    ["Conciliaciones confirmadas", summary.confirmedReconciliations],
+    ["Movimientos conciliados", summary.confirmedCount],
+    ["Propuestas a revisar", summary.possibleReconciliations],
+    ["Movimientos en propuestas", summary.possibleCount],
+    ["Movimientos pendientes", summary.pendingCount],
     ["Excluidos por período", summary.excludedCount],
     ["Movimientos recibidos", summary.incomingTransfers.length],
     ["Movimientos enviados", summary.outgoingTransfers.length],
-    ["Importe conciliado", formatMoney(summary.reconciledAmount)],
-    ["Pendiente absoluto", formatMoney(summary.pendingAbsoluteAmount)],
-    ["Diferencia neta", formatMoney(summary.pendingDifference)],
-    ["Avance por filas", `${formatDecimal(summary.percentage, 1)}%`],
-    ["Avance por importe", `${formatDecimal(summary.amountPercentage, 1)}%`]
+    ["Avance por movimientos", `${formatDecimal(summary.percentage, 1)}%`],
+    ["Cobertura por importe", `${formatDecimal(summary.amountPercentage, 1)}%`]
   ].map(([label, value]) => `<div class="export-stat"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join("");
   const fileNameInput = document.getElementById("exportFileName");
   if (!fileNameInput.value.trim()) fileNameInput.value = `conciliacion_${toFileTimestamp()}`;
@@ -6291,16 +6337,23 @@ function exportWorkbook() {
       ["Movimientos activos de caja o banco", summary.totalBank],
       ["Movimientos excluidos por período", summary.excludedCount],
       ["Período activo", state.review.periodFilter?.from || state.review.periodFilter?.to ? `${state.review.periodFilter.from ? `Desde ${formatDateInput(state.review.periodFilter.from)}` : "Sin fecha inicial"} · ${state.review.periodFilter.to ? `Hasta ${formatDateInput(state.review.periodFilter.to)}` : "Sin fecha final"}` : "Sin recorte"],
-      ["Movimientos conciliados", summary.confirmedCount],
-      ["Movimientos en posibles conciliaciones", summary.possibleCount],
-      ["Movimientos pendientes", summary.pendingCount],
+      ["Conciliaciones confirmadas", summary.confirmedReconciliations],
+      ["Movimientos conciliados del sistema", summary.confirmedSystemCount],
+      ["Movimientos conciliados de caja o banco", summary.confirmedBankCount],
+      ["Propuestas a revisar", summary.possibleReconciliations],
+      ["Movimientos del sistema en propuestas", summary.possibleSystemCount],
+      ["Movimientos de caja o banco en propuestas", summary.possibleBankCount],
+      ["Movimientos pendientes del sistema", summary.pendingSystem.length],
+      ["Movimientos pendientes de caja o banco", summary.pendingBank.length],
       ["Movimientos recibidos desde otras cuentas", summary.incomingTransfers.length],
       ["Movimientos enviados a otras cuentas", summary.outgoingTransfers.length],
-      ["Importe conciliado", summary.reconciledAmount],
-      ["Importe pendiente absoluto", summary.pendingAbsoluteAmount],
-      ["Diferencia pendiente neta", summary.pendingDifference],
-      ["Porcentaje de conciliación por filas", summary.percentage / 100],
-      ["Porcentaje de conciliación por importe", summary.amountPercentage / 100],
+      ["Suma conciliada del lado sistema", summary.reconciledAmount],
+      ["Suma absoluta pendiente de ambos lados", summary.pendingAbsoluteAmount],
+      ["Diferencia entre pendientes (sistema - caja/banco)", summary.pendingDifference],
+      ["Porcentaje de conciliación por movimientos", summary.percentage / 100],
+      ["Cobertura por importe del sistema", summary.systemAmountPercentage / 100],
+      ["Cobertura por importe de caja o banco", summary.bankAmountPercentage / 100],
+      ["Cobertura por importe promedio", summary.amountPercentage / 100],
       ["", ""],
       ["PARÁMETROS UTILIZADOS", ""],
       ["Tolerancia de fechas (días)", state.config.dateTolerance],
@@ -6758,6 +6811,7 @@ window.ReconciliationApp = Object.freeze({
   loadSourceFile,
   loadPreviousReconciliationFile,
   renderReview,
+  calculateSummary,
   normalizeSourceRow,
   movementDebitCredit,
   debitCreditTotals,

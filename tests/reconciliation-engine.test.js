@@ -327,5 +327,34 @@ const mov = (id, source, date, description, amount) => ({ id, source, row: 1, da
   currencyBank.sources.bank.movements.push({ id:'same-number-bank', source:'bank', row:1, date:'2026-08-01T00:00:00.000Z', dateKey:'2026-08-01', description:'Transferencia', amount:100, debitAmount:100, creditAmount:0, type:'debit', status:'' });
   assert.equal(app.findCrossAccountCandidates([{ snapshot:currencySystem }, { snapshot:currencyBank }]).length, 0, 'cross-currency candidate was proposed');
 
+  const summaryState = app.getState();
+  summaryState.sources.system.movements = [
+    mov('summary-s1','system','2026-08-01','Confirmado 1',100),
+    mov('summary-s2','system','2026-08-01','Confirmado 2',50),
+    mov('summary-s3','system','2026-08-02','Propuesto',30),
+    mov('summary-s4','system','2026-08-03','Pendiente',20)
+  ];
+  summaryState.sources.bank.movements = [
+    mov('summary-b1','bank','2026-08-01','Confirmado banco',150),
+    mov('summary-b2','bank','2026-08-02','Propuesto banco',30)
+  ];
+  summaryState.results.reconciliations = [
+    { id:'SUMMARY-CONFIRMED', status:'confirmed', systemIds:['summary-s1','summary-s2'], bankIds:['summary-b1'], totalSystem:150, totalBank:150 },
+    { id:'SUMMARY-POSSIBLE', status:'possible', systemIds:['summary-s3'], bankIds:['summary-b2'], totalSystem:30, totalBank:30 }
+  ];
+  summaryState.review.periodFilter = { from:'', to:'' };
+  summaryState.transferLog = [];
+  const reviewSummary = app.calculateSummary();
+  assert.equal(reviewSummary.confirmedReconciliations, 1, 'confirmed reconciliation groups are not counted separately');
+  assert.equal(reviewSummary.confirmedCount, 3, 'confirmed individual movements count mismatch');
+  assert.equal(reviewSummary.possibleReconciliations, 1, 'possible reconciliation groups count mismatch');
+  assert.equal(reviewSummary.possibleCount, 2, 'movements involved in proposals count mismatch');
+  assert.equal(reviewSummary.pendingCount, 1, 'pending individual movements count mismatch');
+  assert.equal(Number(reviewSummary.percentage.toFixed(1)), 50, 'movement progress must use individual rows');
+  assert.equal(Number(reviewSummary.amountPercentage.toFixed(1)), 79.2, 'amount coverage must average both sides instead of adding them');
+  assert(editorCss.includes('overflow-wrap: anywhere'), 'summary card values must wrap instead of leaving the card');
+  assert(indexHtml.includes('<small>conciliaciones</small>'), 'review tabs must identify reconciliation counts');
+  assert(indexHtml.includes('<small>movimientos</small>'), 'pending tab must identify movement counts');
+
   console.log('All tests passed');
 })().catch(err => { console.error(err); process.exit(1); });
